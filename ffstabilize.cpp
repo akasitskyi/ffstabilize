@@ -34,11 +34,33 @@ extern "C" {
 #include <libavformat/avformat.h>
 }
 
+int av_check_err(int err, std::string filename, int line) {
+	if (err < 0) {
+		char errbuf[AV_ERROR_MAX_STRING_SIZE]{};
+		av_make_error_string(errbuf, AV_ERROR_MAX_STRING_SIZE, err);
+		throw c4::exception(errbuf, filename, line);
+	}
+	return err;
+}
+
+#define AV_CALL(x) av_check_err(x, __FILE__, __LINE__)
+
 class FfmpegFrameProcessor {
 	AVFormatContext* inputFormatContext = nullptr;
 	AVFormatContext* outputFormatContext = nullptr;
 	//AVCodecContext* codecContext = nullptr;
 	//AVFrame* frame = nullptr;
+
+	static const AVCodec* find_best_encoder(const std::vector<std::string>& names){
+		for (const std::string& name : names) {
+			const AVCodec* codec = avcodec_find_encoder_by_name(name.c_str());
+			if (codec) {
+				return codec;
+			}
+		}
+
+		return nullptr;
+	}
 
 public:
 	FfmpegFrameProcessor(const std::string& input_filename, const std::string& output_filename) {
@@ -46,7 +68,7 @@ public:
 		ASSERT_TRUE(inputFormatContext != nullptr);
 		ASSERT_EQUAL(avformat_open_input(&inputFormatContext, input_filename.c_str(), NULL, NULL), 0);
 		av_dump_format(inputFormatContext, 0, input_filename.c_str(), 0);
-		ASSERT_EQUAL(avformat_find_stream_info(inputFormatContext, NULL), 0);
+		AV_CALL(avformat_find_stream_info(inputFormatContext, NULL));
 
 		avformat_alloc_output_context2(&outputFormatContext, NULL, NULL, output_filename.c_str());
 		ASSERT_TRUE(outputFormatContext != nullptr);
@@ -61,7 +83,7 @@ public:
 
 			AVStream* outStream = avformat_new_stream(outputFormatContext, NULL);
 			ASSERT_TRUE(outStream != nullptr);
-			ASSERT_TRUE(avcodec_parameters_copy(outStream->codecpar, inCodecParameters) >= 0);
+			AV_CALL(avcodec_parameters_copy(outStream->codecpar, inCodecParameters));
 
 			const AVCodec* codec = avcodec_find_decoder(inCodecParameters->codec_id);
 			if (!codec) {
@@ -78,56 +100,79 @@ public:
 			}
 		}
 
-		AVCodecContext* codecContext = avcodec_alloc_context3(inputVideoCodec);
-		ASSERT_TRUE(codecContext != nullptr);
-		ASSERT_TRUE(avcodec_parameters_to_context(codecContext, inputVideoCodecParameters) >= 0);
-		ASSERT_TRUE(avcodec_open2(codecContext, inputVideoCodec, NULL) >= 0);
+		AVCodecContext* inputCodecContext = avcodec_alloc_context3(inputVideoCodec);
+		ASSERT_TRUE(inputCodecContext != nullptr);
+		ASSERT_TRUE(avcodec_parameters_to_context(inputCodecContext, inputVideoCodecParameters) >= 0);
+		ASSERT_TRUE(avcodec_open2(inputCodecContext, inputVideoCodec, NULL) >= 0);
 
 		av_dump_format(outputFormatContext, 0, output_filename.c_str(), 1);
 
-		ASSERT_TRUE(avio_open(&outputFormatContext->pb, output_filename.c_str(), AVIO_FLAG_WRITE) >= 0);
+		AVRational input_framerate = av_guess_frame_rate(inputFormatContext, inputFormatContext->streams[videoStreamIndex], NULL);
+		const AVCodec* outputVideoCodec = find_best_encoder({"hevc_nvenc", "libx265", "libx264"});
+		ASSERT_TRUE(outputVideoCodec != nullptr);
+
+		AVCodecContext* outputCodecContext = avcodec_alloc_context3(outputVideoCodec);
+		outputCodecContext->height = inputCodecContext->height;
+		outputCodecContext->width = inputCodecContext->width;
+		outputCodecContext->sample_aspect_ratio = inputCodecContext->sample_aspect_ratio;
+		outputCodecContext->pix_fmt = inputCodecContext->pix_fmt;
+		outputCodecContext->bit_rate = inputCodecContext->bit_rate;
+		outputCodecContext->time_base = av_inv_q(input_framerate);
+
+		AV_CALL(avcodec_open2(outputCodecContext, outputVideoCodec, NULL));
+		AV_CALL(avcodec_parameters_from_context(outputFormatContext->streams[videoStreamIndex]->codecpar, outputCodecContext));
+
+		if (outputFormatContext->oformat->flags & AVFMT_GLOBALHEADER){
+			outputFormatContext->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+		}
+
+		AV_CALL(avio_open(&outputFormatContext->pb, output_filename.c_str(), AVIO_FLAG_WRITE));
 
 		ASSERT_TRUE(avformat_write_header(outputFormatContext, NULL) >= 0);
-
-		AVFrame* frame = av_frame_alloc();
 
 		AVPacket packet;
 
 		while (av_read_frame(inputFormatContext, &packet) >= 0) {
-			if (packet.stream_index == videoStreamIndex) {
-				decode_packet(&packet, codecContext, frame);
-			}
-
 			AVStream* inStream = inputFormatContext->streams[packet.stream_index];
 			AVStream* outStream = outputFormatContext->streams[packet.stream_index];
-			packet.pts = av_rescale_q_rnd(packet.pts, inStream->time_base, outStream->time_base, AVRounding(AV_ROUND_NEAR_INF|AV_ROUND_PASS_MINMAX));
-			packet.dts = av_rescale_q_rnd(packet.dts, inStream->time_base, outStream->time_base, AVRounding(AV_ROUND_NEAR_INF | AV_ROUND_PASS_MINMAX));
-			packet.duration = av_rescale_q(packet.duration, inStream->time_base, outStream->time_base);
-			packet.pos = -1;
-			ASSERT_TRUE(av_interleaved_write_frame(outputFormatContext, &packet) >= 0);
+
+			if (packet.stream_index == videoStreamIndex) {
+				AV_CALL(avcodec_send_packet(inputCodecContext, &packet));
+
+				AVFrame* frame = av_frame_alloc();
+				while(avcodec_receive_frame(inputCodecContext, frame) >= 0) {
+					frame->pict_type = AV_PICTURE_TYPE_NONE;
+					encode_frame(outputCodecContext, videoStreamIndex, inStream, outStream, frame);
+				}
+				av_frame_unref(frame);
+			} else {
+				packet.pts = av_rescale_q_rnd(packet.pts, inStream->time_base, outStream->time_base, AVRounding(AV_ROUND_NEAR_INF|AV_ROUND_PASS_MINMAX));
+				packet.dts = av_rescale_q_rnd(packet.dts, inStream->time_base, outStream->time_base, AVRounding(AV_ROUND_NEAR_INF | AV_ROUND_PASS_MINMAX));
+				packet.duration = av_rescale_q(packet.duration, inStream->time_base, outStream->time_base);
+				packet.pos = -1;
+				ASSERT_TRUE(av_interleaved_write_frame(outputFormatContext, &packet) >= 0);
+			}
 
 			av_packet_unref(&packet);
 		}
+
+		encode_frame(outputCodecContext, videoStreamIndex, inputFormatContext->streams[videoStreamIndex], outputFormatContext->streams[videoStreamIndex], nullptr);
 		av_write_trailer(outputFormatContext);
 	}
 
-	//AVFrame* read_frame() {
-	//	int how_many_packets_to_process = 8;
+	void encode_frame(AVCodecContext* outputCodecContext, int videoStreamIndex, AVStream* inStream, AVStream* outStream, AVFrame* frame){
+		avcodec_send_frame(outputCodecContext, frame);
 
-	//	if (av_read_frame(inputFormatContext, packet) >= 0 && how_many_packets_to_process-- > 0) {
-	//		if (packet->stream_index == 0) {
-	//			int response = decode_packet(packet, codecContext, frame);
-	//			if (response < 0) {
-	//				return nullptr;
-	//			}
-	//		}
-	//		av_packet_unref(packet);
-	//	} else {
-	//		return nullptr;
-	//	}
-	//	return frame;
-	//}
-	
+		AVPacket *output_packet = av_packet_alloc();
+		while (avcodec_receive_packet(outputCodecContext, output_packet) >= 0) {
+			output_packet->stream_index = videoStreamIndex;
+			av_packet_rescale_ts(output_packet, inStream->time_base, outStream->time_base);
+			ASSERT_TRUE(av_interleaved_write_frame(outputFormatContext, output_packet) >= 0);
+		}
+		av_packet_unref(output_packet);
+		av_packet_free(&output_packet);
+	}
+
 	~FfmpegFrameProcessor() {
 		avformat_close_input(&inputFormatContext);
 		
@@ -139,30 +184,6 @@ public:
 	}
 
 private:
-	static void decode_packet(AVPacket *pPacket, AVCodecContext *pCodecContext, AVFrame *pFrame) {
-		int response = avcodec_send_packet(pCodecContext, pPacket);
-
-		if (response < 0) {
-			char errbuf[AV_ERROR_MAX_STRING_SIZE]{};
-			THROW_EXCEPTION(av_make_error_string(errbuf, AV_ERROR_MAX_STRING_SIZE, response));
-		}
-
-		while (response >= 0) {
-			response = avcodec_receive_frame(pCodecContext, pFrame);
-			if (response == AVERROR(EAGAIN) || response == AVERROR_EOF) {
-				break;
-			} 
-			if (response < 0) {
-				break;
-			}
-
-			ASSERT_EQUAL (pFrame->format, AV_PIX_FMT_YUV420P);
-
-			c4::matrix_ref img(pFrame->height, pFrame->width, pFrame->linesize[0], pFrame->data[0]);
-
-			//c4::dump_image(img, "in");
-		}
-	}
 };
 
 int main(int argc, char* argv[]) {
