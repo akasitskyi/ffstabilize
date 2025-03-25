@@ -32,6 +32,7 @@
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
+#include <libavutil/pixdesc.h>
 }
 
 int av_check_err(int err, std::string filename, int line) {
@@ -45,7 +46,7 @@ int av_check_err(int err, std::string filename, int line) {
 
 #define AV_CALL(x) av_check_err(x, __FILE__, __LINE__)
 
-class FfmpegFrameProcessor {
+class FfmpegVideoProcessor {
 	AVFormatContext* inputFormatContext = nullptr;
 	AVFormatContext* outputFormatContext = nullptr;
 	//AVCodecContext* codecContext = nullptr;
@@ -63,7 +64,13 @@ class FfmpegFrameProcessor {
 	}
 
 public:
-	FfmpegFrameProcessor(const std::string& input_filename, const std::string& output_filename) {
+
+	class FrameProcessor {
+	public:
+		virtual void operator()(AVFrame* src) = 0;
+	};
+
+	FfmpegVideoProcessor(const std::string& input_filename, const std::string& output_filename, FrameProcessor& frame_processor) {
 		inputFormatContext = avformat_alloc_context();
 		ASSERT_TRUE(inputFormatContext != nullptr);
 		ASSERT_EQUAL(avformat_open_input(&inputFormatContext, input_filename.c_str(), NULL, NULL), 0);
@@ -141,6 +148,7 @@ public:
 
 				AVFrame* frame = av_frame_alloc();
 				while(avcodec_receive_frame(inputCodecContext, frame) >= 0) {
+					frame_processor(frame);
 					frame->pict_type = AV_PICTURE_TYPE_NONE;
 					encode_frame(outputCodecContext, videoStreamIndex, inStream, outStream, frame);
 				}
@@ -173,7 +181,7 @@ public:
 		av_packet_free(&output_packet);
 	}
 
-	~FfmpegFrameProcessor() {
+	~FfmpegVideoProcessor() {
 		avformat_close_input(&inputFormatContext);
 		
 		avio_closep(&outputFormatContext->pb);
@@ -186,13 +194,75 @@ public:
 private:
 };
 
+
+class VidStabProcessor : public FfmpegVideoProcessor::FrameProcessor {
+	c4::VideoStabilization stabilizer;
+	const int downscale;
+public:
+	VidStabProcessor(const c4::VideoStabilization::Params& params, int downscale) : stabilizer(params), downscale(downscale) {
+	}
+	
+	void operator()(AVFrame* src) override {
+        c4::scoped_timer timer("VidStabProcessor()");
+
+		ASSERT_TRUE(src != nullptr);
+		//PRINT_DEBUG(av_frame_is_writable(src));
+		AV_CALL(av_frame_make_writable(src));
+
+		const AVPixFmtDescriptor *pixdesc = av_pix_fmt_desc_get((AVPixelFormat)src->format);
+
+		c4::VideoStabilization::FramePtr frame = std::make_shared<c4::VideoStabilization::Frame>();
+
+		if (pixdesc->comp[0].depth == 8) {
+			c4::matrix_ref<uint8_t> m(src->height, src->width, src->linesize[0],  src->data[0]);
+			c4::downscale_bilinear_nx(m, *frame, downscale);
+			//c4::force_dump_image(*frame, "frame");
+		} else {
+			PRINT_DEBUG(pixdesc->comp[0].depth);
+			PRINT_DEBUG(pixdesc->comp[0].shift);
+			PRINT_DEBUG(pixdesc->comp[0].offset);
+			THROW_EXCEPTION("Unsupported pixel format");
+		}
+
+		c4::MotionDetector::Motion motion = stabilizer.process(frame);
+
+		const int planes = pixdesc->nb_components;
+		ASSERT_EQUAL(planes, av_pix_fmt_count_planes((AVPixelFormat)src->format));
+
+        c4::scoped_timer timer2("VidStabProcessor(): apply");
+
+		for (int p = 0; p < planes; p++) {
+			const int h = p ? AV_CEIL_RSHIFT(src->height, pixdesc->log2_chroma_h) : src->height;
+			const int w = p ? AV_CEIL_RSHIFT(src->width, pixdesc->log2_chroma_w) : src->width;
+			c4::MotionDetector::Motion motion2 = motion;
+			if (p) {
+				motion2.shift.y *= (double)h / src->height;
+				motion2.shift.x *= (double)w / src->width;
+			}
+			if (pixdesc->comp[p].depth == 8) {
+				c4::matrix_ref<uint8_t> mr(h, w, src->linesize[p], src->data[p]);
+				c4::matrix<uint8_t> m = mr;
+				motion2.apply(m, mr);
+				//c4::force_dump_image(m, "m");
+				//c4::force_dump_image(mr, "mr");
+			}else{
+				THROW_EXCEPTION("Unsupported pixel format");
+			}
+		}
+	}
+};
+
 int main(int argc, char* argv[]) {
     try{
         c4::scoped_timer timer("main");
 
-		c4::image_dumper::getInstance().init("", true);
+		c4::image_dumper::getInstance().init("", false);
 
-		FfmpegFrameProcessor frameProcessor("in.mp4", "out.mp4");
+		c4::VideoStabilization::Params params;
+		const int downscale = 2;
+		VidStabProcessor frameProcessor(params, downscale);
+
+		FfmpegVideoProcessor videoProcessor("in.mp4", "out.mp4", frameProcessor);
 
     } catch (const std::exception& e) {
         std::cerr << e.what() << std::endl;
