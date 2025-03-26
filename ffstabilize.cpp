@@ -22,10 +22,8 @@
 
 #include <memory>
 
-#include <c4/jpeg.hpp>
 #include <c4/drawing.hpp>
-#include <c4/string.hpp>
-#include <c4/serialize.hpp>
+#include <c4/cmd_opts.hpp>
 #include <c4/image_dumper.hpp>
 #include <c4/video_stabilization.hpp>
 
@@ -198,8 +196,16 @@ private:
 class VidStabProcessor : public FfmpegVideoProcessor::FrameProcessor {
 	c4::VideoStabilization stabilizer;
 	const int downscale;
+
+	static std::vector<c4::rectangle<int>> downscale_rects(const std::vector<c4::rectangle<int>>& rects, int downscale) {
+		std::vector<c4::rectangle<int>> scaled;
+		for (const c4::rectangle<int>& r : rects) {
+			scaled.emplace_back(r.x / downscale, r.y / downscale, r.w / downscale, r.h / downscale);
+		}
+		return scaled;
+	}
 public:
-	VidStabProcessor(const c4::VideoStabilization::Params& params, int downscale) : stabilizer(params), downscale(downscale) {
+	VidStabProcessor(const c4::VideoStabilization::Params& params, const std::vector<c4::rectangle<int>> ignore, int downscale) : stabilizer(params, downscale_rects(ignore, downscale)), downscale(downscale) {
 	}
 	
 	void operator()(AVFrame* src) override {
@@ -234,17 +240,14 @@ public:
 		for (int p = 0; p < planes; p++) {
 			const int h = p ? AV_CEIL_RSHIFT(src->height, pixdesc->log2_chroma_h) : src->height;
 			const int w = p ? AV_CEIL_RSHIFT(src->width, pixdesc->log2_chroma_w) : src->width;
-			c4::MotionDetector::Motion motion2 = motion;
-			if (p) {
-				motion2.shift.y *= (double)h / src->height;
-				motion2.shift.x *= (double)w / src->width;
-			}
+			c4::MotionDetector::Motion planeSizeAdjustedMotion = motion;
+			planeSizeAdjustedMotion.shift.y *= (double)h / frame->height();
+			planeSizeAdjustedMotion.shift.x *= (double)w / frame->width();
+
 			if (pixdesc->comp[p].depth == 8) {
-				c4::matrix_ref<uint8_t> mr(h, w, src->linesize[p], src->data[p]);
-				c4::matrix<uint8_t> m = mr;
-				motion2.apply(m, mr);
-				//c4::force_dump_image(m, "m");
-				//c4::force_dump_image(mr, "mr");
+				c4::matrix_ref<uint8_t> planeRef(h, w, src->linesize[p], src->data[p]);
+				c4::matrix<uint8_t> srcPlaneCopy = planeRef;
+				planeSizeAdjustedMotion.apply(srcPlaneCopy, planeRef);
 			}else{
 				THROW_EXCEPTION("Unsupported pixel format");
 			}
@@ -254,13 +257,35 @@ public:
 
 int main(int argc, char* argv[]) {
     try{
-        c4::scoped_timer timer("main");
+		c4::Logger::setLogLevel(c4::LOG_DEBUG);
 
-		c4::image_dumper::getInstance().init("", false);
+		c4::scoped_timer timer("main", c4::LOG_DEBUG);
+
+		c4::cmd_opts opts;
+		auto ignoreCmdOpt = opts.add_multiple("ignore");
+
+		opts.parse(argc, argv);
 
 		c4::VideoStabilization::Params params;
 		const int downscale = 2;
-		VidStabProcessor frameProcessor(params, downscale);
+
+		std::vector<std::string> ignore = ignoreCmdOpt;
+
+		std::vector<c4::rectangle<int>> ignoreRects;
+		for (const std::string& s : ignore) {
+			std::vector<std::string> parts = c4::split(s, ", ");
+			if (parts.size() != 4) {
+				THROW_EXCEPTION("Invalid ignore rectangle: " + s);
+			}
+			c4::rectangle<int> r(std::stoi(parts[0]), std::stoi(parts[1]), std::stoi(parts[2]), std::stoi(parts[3]));
+			ignoreRects.push_back(r);
+
+			LOGD << "Ignore rect: " << r.x << " " << r.y << " " << r.w << " " << r.h;
+		}
+
+		c4::image_dumper::getInstance().init("", false);
+
+		VidStabProcessor frameProcessor(params, ignoreRects, downscale);
 
 		FfmpegVideoProcessor videoProcessor("in.mp4", "out.mp4", frameProcessor);
 
