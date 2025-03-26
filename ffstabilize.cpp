@@ -45,11 +45,6 @@ int av_check_err(int err, std::string filename, int line) {
 #define AV_CALL(x) av_check_err(x, __FILE__, __LINE__)
 
 class FfmpegVideoProcessor {
-	AVFormatContext* inputFormatContext = nullptr;
-	AVFormatContext* outputFormatContext = nullptr;
-	//AVCodecContext* codecContext = nullptr;
-	//AVFrame* frame = nullptr;
-
 	static const AVCodec* find_best_encoder(const std::vector<std::string>& names){
 		for (const std::string& name : names) {
 			const AVCodec* codec = avcodec_find_encoder_by_name(name.c_str());
@@ -61,6 +56,13 @@ class FfmpegVideoProcessor {
 		return nullptr;
 	}
 
+	AVFormatContext* inputFormatContext = nullptr;
+	AVFormatContext* outputFormatContext = nullptr;
+	AVCodecContext* inputCodecContext = nullptr;
+	AVCodecContext* outputCodecContext = nullptr;
+
+	int videoStreamIndex = -1;
+
 public:
 
 	class FrameProcessor {
@@ -68,7 +70,7 @@ public:
 		virtual void operator()(AVFrame* src) = 0;
 	};
 
-	FfmpegVideoProcessor(const std::string& input_filename, const std::string& output_filename, FrameProcessor& frame_processor) {
+	FfmpegVideoProcessor(const std::string& input_filename, const std::string& output_filename) {
 		inputFormatContext = avformat_alloc_context();
 		ASSERT_TRUE(inputFormatContext != nullptr);
 		ASSERT_EQUAL(avformat_open_input(&inputFormatContext, input_filename.c_str(), NULL, NULL), 0);
@@ -80,8 +82,6 @@ public:
 
 		const AVCodec *inputVideoCodec = NULL;
 		AVCodecParameters *inputVideoCodecParameters =  NULL;
-
-		int videoStreamIndex = -1;
 
 		for (int i = 0; i < inputFormatContext->nb_streams; i++) {
 			AVCodecParameters *inCodecParameters = inputFormatContext->streams[i]->codecpar;
@@ -105,7 +105,9 @@ public:
 			}
 		}
 
-		AVCodecContext* inputCodecContext = avcodec_alloc_context3(inputVideoCodec);
+		ASSERT_TRUE(videoStreamIndex >= 0);
+
+		inputCodecContext = avcodec_alloc_context3(inputVideoCodec);
 		ASSERT_TRUE(inputCodecContext != nullptr);
 		ASSERT_TRUE(avcodec_parameters_to_context(inputCodecContext, inputVideoCodecParameters) >= 0);
 		ASSERT_TRUE(avcodec_open2(inputCodecContext, inputVideoCodec, NULL) >= 0);
@@ -116,7 +118,9 @@ public:
 		const AVCodec* outputVideoCodec = find_best_encoder({"hevc_nvenc", "libx265", "libx264"});
 		ASSERT_TRUE(outputVideoCodec != nullptr);
 
-		AVCodecContext* outputCodecContext = avcodec_alloc_context3(outputVideoCodec);
+		outputCodecContext = avcodec_alloc_context3(outputVideoCodec);
+		ASSERT_TRUE(outputCodecContext != nullptr);
+
 		outputCodecContext->height = inputCodecContext->height;
 		outputCodecContext->width = inputCodecContext->width;
 		outputCodecContext->sample_aspect_ratio = inputCodecContext->sample_aspect_ratio;
@@ -134,7 +138,9 @@ public:
 		AV_CALL(avio_open(&outputFormatContext->pb, output_filename.c_str(), AVIO_FLAG_WRITE));
 
 		ASSERT_TRUE(avformat_write_header(outputFormatContext, NULL) >= 0);
+	}
 
+	void process(FrameProcessor& frame_processor) {
 		AVPacket packet;
 
 		while (av_read_frame(inputFormatContext, &packet) >= 0) {
@@ -148,7 +154,7 @@ public:
 				while(avcodec_receive_frame(inputCodecContext, frame) >= 0) {
 					frame_processor(frame);
 					frame->pict_type = AV_PICTURE_TYPE_NONE;
-					encode_frame(outputCodecContext, videoStreamIndex, inStream, outStream, frame);
+					encode_frame(inStream, outStream, frame);
 				}
 				av_frame_unref(frame);
 			} else {
@@ -162,11 +168,11 @@ public:
 			av_packet_unref(&packet);
 		}
 
-		encode_frame(outputCodecContext, videoStreamIndex, inputFormatContext->streams[videoStreamIndex], outputFormatContext->streams[videoStreamIndex], nullptr);
+		encode_frame(inputFormatContext->streams[videoStreamIndex], outputFormatContext->streams[videoStreamIndex], nullptr);
 		av_write_trailer(outputFormatContext);
 	}
 
-	void encode_frame(AVCodecContext* outputCodecContext, int videoStreamIndex, AVStream* inStream, AVStream* outStream, AVFrame* frame){
+	void encode_frame(AVStream* inStream, AVStream* outStream, AVFrame* frame){
 		avcodec_send_frame(outputCodecContext, frame);
 
 		AVPacket *output_packet = av_packet_alloc();
@@ -184,9 +190,6 @@ public:
 		
 		avio_closep(&outputFormatContext->pb);
 		avformat_free_context(outputFormatContext);
-		
-		//av_frame_free(&frame);
-		//avcodec_free_context(&codecContext);
 	}
 
 private:
@@ -287,8 +290,8 @@ int main(int argc, char* argv[]) {
 
 		VidStabProcessor frameProcessor(params, ignoreRects, downscale);
 
-		FfmpegVideoProcessor videoProcessor("in.mp4", "out.mp4", frameProcessor);
-
+		FfmpegVideoProcessor videoProcessor("in.mp4", "out.mp4");
+		videoProcessor.process(frameProcessor);
     } catch (const std::exception& e) {
         std::cerr << e.what() << std::endl;
     }
