@@ -46,11 +46,17 @@ int av_check_err(int err, std::string filename, int line) {
 #define AV_CALL(x) av_check_err(x, __FILE__, __LINE__)
 
 class FfmpegVideoProcessor {
-	static const AVCodec* find_best_encoder(const std::vector<std::string>& names){
+	static const AVCodec* find_best_encoder(const std::vector<std::string>& names, const AVPixelFormat px_fmt){
 		for (const std::string& name : names) {
 			const AVCodec* codec = avcodec_find_encoder_by_name(name.c_str());
-			if (codec) {
-				return codec;
+			if (!codec)
+				continue;
+			const enum AVPixelFormat *pix_fmts = NULL;
+			int out_num_configs = 0;
+			avcodec_get_supported_config(NULL, codec, AV_CODEC_CONFIG_PIX_FORMAT, 0, (const void**)&pix_fmts, &out_num_configs);
+			for (int i = 0; i < out_num_configs; i++) {
+				if (pix_fmts[i] == px_fmt)
+					return codec;
 			}
 		}
 
@@ -63,6 +69,7 @@ class FfmpegVideoProcessor {
 	AVCodecContext* outputCodecContext = nullptr;
 
 	int videoStreamIndex = -1;
+	std::vector<int> streamMapping;
 	int frameNumber = 0;
 
 public:
@@ -75,7 +82,7 @@ public:
 	FfmpegVideoProcessor(const std::string& input_filename, const std::string& output_filename) {
 		inputFormatContext = avformat_alloc_context();
 		ASSERT_TRUE(inputFormatContext != nullptr);
-		ASSERT_EQUAL(avformat_open_input(&inputFormatContext, input_filename.c_str(), NULL, NULL), 0);
+		AV_CALL(avformat_open_input(&inputFormatContext, input_filename.c_str(), NULL, NULL));
 		if (c4::Logger::getLogLevel() >= c4::LOG_DEBUG) {
 			av_dump_format(inputFormatContext, 0, input_filename.c_str(), 0);
 		}
@@ -87,12 +94,22 @@ public:
 		const AVCodec *inputVideoCodec = NULL;
 		AVCodecParameters *inputVideoCodecParameters =  NULL;
 
+		streamMapping.resize(inputFormatContext->nb_streams, -1);
+
+		int outStreamIndex = 0;
+
 		for (int i = 0; i < inputFormatContext->nb_streams; i++) {
 			AVCodecParameters *inCodecParameters = inputFormatContext->streams[i]->codecpar;
+
+			if (inCodecParameters->codec_type != AVMEDIA_TYPE_AUDIO && inCodecParameters->codec_type != AVMEDIA_TYPE_VIDEO && inCodecParameters->codec_type != AVMEDIA_TYPE_SUBTITLE) {
+				LOGW << "Skipping stream " << i << " of type " << av_get_media_type_string(inCodecParameters->codec_type);
+				continue;
+			}
 
 			AVStream* outStream = avformat_new_stream(outputFormatContext, NULL);
 			ASSERT_TRUE(outStream != nullptr);
 			AV_CALL(avcodec_parameters_copy(outStream->codecpar, inCodecParameters));
+			streamMapping[i] = outStreamIndex++;
 
 			const AVCodec* codec = avcodec_find_decoder(inCodecParameters->codec_id);
 			if (!codec) {
@@ -123,7 +140,7 @@ public:
 		}
 
 		AVRational input_framerate = av_guess_frame_rate(inputFormatContext, inputFormatContext->streams[videoStreamIndex], NULL);
-		const AVCodec* outputVideoCodec = find_best_encoder({"hevc_nvenc", "libx265", "libx264"});
+		const AVCodec* outputVideoCodec = find_best_encoder({"hevc_nvenc", "libx265", "libx264"}, inputCodecContext->pix_fmt);
 		ASSERT_TRUE(outputVideoCodec != nullptr);
 
 		outputCodecContext = avcodec_alloc_context3(outputVideoCodec);
@@ -145,7 +162,7 @@ public:
 
 		AV_CALL(avio_open(&outputFormatContext->pb, output_filename.c_str(), AVIO_FLAG_WRITE));
 
-		ASSERT_TRUE(avformat_write_header(outputFormatContext, NULL) >= 0);
+		AV_CALL(avformat_write_header(outputFormatContext, NULL));
 	}
 
 	void process(FrameProcessor& frame_processor) {
@@ -153,6 +170,11 @@ public:
 
 		AVPacket packet;
 		while (av_read_frame(inputFormatContext, &packet) >= 0) {
+			if (streamMapping[packet.stream_index] < 0) {
+				av_packet_unref(&packet);
+				continue;
+			}
+
 			AVStream* inStream = inputFormatContext->streams[packet.stream_index];
 			AVStream* outStream = outputFormatContext->streams[packet.stream_index];
 
@@ -239,10 +261,28 @@ public:
 			c4::downscale_bilinear_nx(m, *frame, downscale);
 			//c4::force_dump_image(*frame, "frame");
 		} else {
-			PRINT_DEBUG(pixdesc->comp[0].depth);
-			PRINT_DEBUG(pixdesc->comp[0].shift);
-			PRINT_DEBUG(pixdesc->comp[0].offset);
-			THROW_EXCEPTION("Unsupported pixel format");
+			ASSERT_GREATER(pixdesc->comp[0].depth, 8);
+			ASSERT_LESS_EQUAL(pixdesc->comp[0].depth, 16);
+
+			ASSERT_EQUAL(pixdesc->comp[0].shift, 0);
+			ASSERT_EQUAL(pixdesc->comp[0].offset, 0);
+
+			const int shift = pixdesc->comp[0].depth - 8;
+
+			const int frameHeight = src->height / downscale;
+			const int frameWidth = src->width / downscale;
+			frame->resize(frameHeight, frameWidth);
+
+			// FIXME: rigth now we use nearest neighbor interpolation, should be bilinear, and should be optimized
+			for(int i = 0; i < frameHeight; i++) {
+				int i0 = i * downscale;
+				uint8_t* pdst = (*frame)[i];
+				const uint16_t* psrc = (const uint16_t*)(src->data[0] + i0 * src->linesize[0]);
+
+				for(int j = 0; j < frameWidth; j++) {
+					pdst[j] = psrc[downscale * j] >> shift;
+				}
+			}
 		}
 
 		c4::MotionDetector::Motion motion = stabilizer.process(frame);
@@ -264,7 +304,11 @@ public:
 				c4::matrix<uint8_t> srcPlaneCopy = planeRef;
 				planeSizeAdjustedMotion.apply(srcPlaneCopy, planeRef);
 			}else{
-				THROW_EXCEPTION("Unsupported pixel format");
+				ASSERT_TRUE(pixdesc->comp[0].depth > 8 && pixdesc->comp[0].depth <= 16);
+
+				c4::matrix_ref<uint16_t> planeRef(h, w, src->linesize[p] / 2, (uint16_t*)src->data[p]);
+				c4::matrix<uint16_t> srcPlaneCopy = planeRef;
+				planeSizeAdjustedMotion.apply(srcPlaneCopy, planeRef);
 			}
 		}
 	}
