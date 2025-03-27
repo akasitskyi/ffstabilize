@@ -26,6 +26,7 @@
 #include <c4/cmd_opts.hpp>
 #include <c4/image_dumper.hpp>
 #include <c4/video_stabilization.hpp>
+#include <c4/progress_indicator.hpp>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -62,6 +63,7 @@ class FfmpegVideoProcessor {
 	AVCodecContext* outputCodecContext = nullptr;
 
 	int videoStreamIndex = -1;
+	int frameNumber = 0;
 
 public:
 
@@ -74,7 +76,9 @@ public:
 		inputFormatContext = avformat_alloc_context();
 		ASSERT_TRUE(inputFormatContext != nullptr);
 		ASSERT_EQUAL(avformat_open_input(&inputFormatContext, input_filename.c_str(), NULL, NULL), 0);
-		av_dump_format(inputFormatContext, 0, input_filename.c_str(), 0);
+		if (c4::Logger::getLogLevel() >= c4::LOG_DEBUG) {
+			av_dump_format(inputFormatContext, 0, input_filename.c_str(), 0);
+		}
 		AV_CALL(avformat_find_stream_info(inputFormatContext, NULL));
 
 		avformat_alloc_output_context2(&outputFormatContext, NULL, NULL, output_filename.c_str());
@@ -100,6 +104,8 @@ public:
 				videoStreamIndex = i;
 				inputVideoCodec = codec;
 				inputVideoCodecParameters = inCodecParameters;
+				frameNumber = inputFormatContext->streams[i]->nb_frames;
+				PRINT_DEBUG(frameNumber);
 				PRINT_DEBUG(inCodecParameters->width);
 				PRINT_DEBUG(inCodecParameters->height);
 			}
@@ -112,7 +118,9 @@ public:
 		ASSERT_TRUE(avcodec_parameters_to_context(inputCodecContext, inputVideoCodecParameters) >= 0);
 		ASSERT_TRUE(avcodec_open2(inputCodecContext, inputVideoCodec, NULL) >= 0);
 
-		av_dump_format(outputFormatContext, 0, output_filename.c_str(), 1);
+		if (c4::Logger::getLogLevel() >= c4::LOG_DEBUG) {
+			av_dump_format(outputFormatContext, 0, output_filename.c_str(), 1);
+		}
 
 		AVRational input_framerate = av_guess_frame_rate(inputFormatContext, inputFormatContext->streams[videoStreamIndex], NULL);
 		const AVCodec* outputVideoCodec = find_best_encoder({"hevc_nvenc", "libx265", "libx264"});
@@ -141,8 +149,9 @@ public:
 	}
 
 	void process(FrameProcessor& frame_processor) {
-		AVPacket packet;
+		c4::progress_indicator progress(frameNumber, "Processing frames");
 
+		AVPacket packet;
 		while (av_read_frame(inputFormatContext, &packet) >= 0) {
 			AVStream* inStream = inputFormatContext->streams[packet.stream_index];
 			AVStream* outStream = outputFormatContext->streams[packet.stream_index];
@@ -155,6 +164,7 @@ public:
 					frame_processor(frame);
 					frame->pict_type = AV_PICTURE_TYPE_NONE;
 					encode_frame(inStream, outStream, frame);
+					progress.did_some(1);
 				}
 				av_frame_unref(frame);
 			} else {
@@ -167,6 +177,8 @@ public:
 
 			av_packet_unref(&packet);
 		}
+
+		progress.print_final();
 
 		encode_frame(inputFormatContext->streams[videoStreamIndex], outputFormatContext->streams[videoStreamIndex], nullptr);
 		av_write_trailer(outputFormatContext);
@@ -260,17 +272,48 @@ public:
 
 int main(int argc, char* argv[]) {
     try{
-		c4::Logger::setLogLevel(c4::LOG_DEBUG);
+		c4::Logger::setLogLevel(c4::LOG_INFO);
 
 		c4::scoped_timer timer("main", c4::LOG_DEBUG);
 
+		c4::VideoStabilization::Params params;
+
 		c4::cmd_opts opts;
-		auto ignoreCmdOpt = opts.add_multiple("ignore");
+		auto inputCmdOpt = opts.add_required_free_arg<std::string>("input.mp4");
+		auto outputCmdOpt = opts.add_required_free_arg<std::string>("output.mp4");
+		auto downscaleCmdOpt = opts.add_optional<int>("downscale", 2, "Downscale factor used for motion detection.");
+
+		auto smoothCmdOpt = opts.add_optional<int>("smooth", params.q_length, "How many frames should be used for motion smoothing.");
+		auto blocksizeCmdOpt = opts.add_optional<int>("block_size", params.blockSize, "Block size in pixels (after downscale).");
+		auto maxShiftCmdOpt = opts.add_optional<int>("max_shift", params.maxShift, "Max shift in pixels (after downscale), should be <= block_size / 2.");
+		auto maxAlphaCmdOpt = opts.add_optional<double>("max_alpha", params.maxAlpha, "Max rotation angle of consecutive frames, in radians.");
+		auto maxScaleCmdOpt = opts.add_optional<double>("max_scale", params.maxScale, "Max scale ratio of consecutive frames (1 / max_scale if we scale down).");
+
+		auto ignoreCmdOpt = opts.add_multiple("ignore", "Add rectangle where motion should be ignored. Format: \"x, y, w, h\".");
+
+		auto debugCmdOpt = opts.add_flag("debug", "Enable debug output.");
+		auto verboseCmdOpt = opts.add_flag("verbose", "Enable verbose output.");
 
 		opts.parse(argc, argv);
 
-		c4::VideoStabilization::Params params;
-		const int downscale = 2;
+		if (debugCmdOpt) {
+			c4::Logger::setLogLevel(c4::LOG_DEBUG);
+		}
+
+		if (verboseCmdOpt) {
+			c4::Logger::setLogLevel(c4::LOG_VERBOSE);
+		}
+
+		const std::string inputFilename = inputCmdOpt;
+		const std::string outputFilename = outputCmdOpt;
+
+		const int downscale = downscaleCmdOpt;
+
+		params.q_length = smoothCmdOpt;
+		params.blockSize = blocksizeCmdOpt;
+		params.maxShift = maxShiftCmdOpt;
+		params.maxAlpha = maxAlphaCmdOpt;
+		params.maxScale = maxScaleCmdOpt;
 
 		std::vector<std::string> ignore = ignoreCmdOpt;
 
@@ -290,7 +333,7 @@ int main(int argc, char* argv[]) {
 
 		VidStabProcessor frameProcessor(params, ignoreRects, downscale);
 
-		FfmpegVideoProcessor videoProcessor("in.mp4", "out.mp4");
+		FfmpegVideoProcessor videoProcessor(inputFilename, outputFilename);
 		videoProcessor.process(frameProcessor);
     } catch (const std::exception& e) {
         std::cerr << e.what() << std::endl;
