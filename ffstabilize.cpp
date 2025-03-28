@@ -194,7 +194,7 @@ public:
 				packet.dts = av_rescale_q_rnd(packet.dts, inStream->time_base, outStream->time_base, AVRounding(AV_ROUND_NEAR_INF | AV_ROUND_PASS_MINMAX));
 				packet.duration = av_rescale_q(packet.duration, inStream->time_base, outStream->time_base);
 				packet.pos = -1;
-				ASSERT_TRUE(av_interleaved_write_frame(outputFormatContext, &packet) >= 0);
+				AV_CALL(av_interleaved_write_frame(outputFormatContext, &packet));
 			}
 
 			av_packet_unref(&packet);
@@ -207,7 +207,7 @@ public:
 	}
 
 	void encode_frame(AVStream* inStream, AVStream* outStream, AVFrame* frame){
-		avcodec_send_frame(outputCodecContext, frame);
+		AV_CALL(avcodec_send_frame(outputCodecContext, frame));
 
 		AVPacket *output_packet = av_packet_alloc();
 		while (avcodec_receive_packet(outputCodecContext, output_packet) >= 0) {
@@ -349,6 +349,7 @@ int main(int argc, char* argv[]) {
 		}
 
 		const std::string inputFilename = inputCmdOpt;
+		LOGI << "Input file: " << inputFilename;
 		const std::string outputFilename = outputCmdOpt;
 
 		const int downscale = downscaleCmdOpt;

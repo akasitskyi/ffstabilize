@@ -24,7 +24,6 @@ add_subdirectory( c4/c4 )
 
 add_executable( ffstabilize ffstabilize.cpp )
 
-
 target_link_libraries( ffstabilize
 	${FFMPEG}/lib/avcodec.lib
 	${FFMPEG}/lib/avformat.lib
@@ -37,3 +36,7 @@ if (MSVC)
 	add_custom_command(TARGET ffstabilize POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy "${FFMPEG}/bin/avutil-59.dll" $<TARGET_FILE_DIR:ffstabilize>/..)
 	add_custom_command(TARGET ffstabilize POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy "${FFMPEG}/bin/swresample-5.dll" $<TARGET_FILE_DIR:ffstabilize>/..)
 endif()
+
+add_executable( ffstabilize_tester ffstabilize_tester.cpp )
+
+add_dependencies( ffstabilize_tester ffstabilize )
