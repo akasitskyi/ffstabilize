@@ -63,10 +63,12 @@ class FfmpegVideoProcessor {
 
 		return nullptr;
 	}
-
+	const std::string input_filename;
 	AVFormatContext* inputFormatContext = nullptr;
-	AVFormatContext* outputFormatContext = nullptr;
 	AVCodecContext* inputCodecContext = nullptr;
+
+	const std::string output_filename;
+	AVFormatContext* outputFormatContext = nullptr;
 	AVCodecContext* outputCodecContext = nullptr;
 
 	int videoStreamIndex = -1;
@@ -77,11 +79,12 @@ public:
 
 	class FrameProcessor {
 	public:
-		virtual void operator()(AVFrame* src) = 0;
+		virtual void preprocess(AVFrame* src) = 0;
+		virtual void process(AVFrame* src) = 0;
 		virtual ~FrameProcessor() = default;
 	};
 
-	FfmpegVideoProcessor(const std::string& input_filename, const std::string& output_filename) {
+	void init_input() {
 		inputFormatContext = avformat_alloc_context();
 		ASSERT_TRUE(inputFormatContext != nullptr);
 		AV_CALL(avformat_open_input(&inputFormatContext, input_filename.c_str(), NULL, NULL));
@@ -90,15 +93,13 @@ public:
 		}
 		AV_CALL(avformat_find_stream_info(inputFormatContext, NULL));
 
-		avformat_alloc_output_context2(&outputFormatContext, NULL, NULL, output_filename.c_str());
-		ASSERT_TRUE(outputFormatContext != nullptr);
-
 		const AVCodec *inputVideoCodec = NULL;
 		AVCodecParameters *inputVideoCodecParameters =  NULL;
 
-		streamMapping.resize(inputFormatContext->nb_streams, -1);
+		streamMapping = std::vector<int>(inputFormatContext->nb_streams, -1);
 
 		int outStreamIndex = 0;
+		videoStreamIndex = -1;
 
 		for (int i = 0; i < inputFormatContext->nb_streams; i++) {
 			AVCodecParameters *inCodecParameters = inputFormatContext->streams[i]->codecpar;
@@ -108,9 +109,6 @@ public:
 				continue;
 			}
 
-			AVStream* outStream = avformat_new_stream(outputFormatContext, NULL);
-			ASSERT_TRUE(outStream != nullptr);
-			AV_CALL(avcodec_parameters_copy(outStream->codecpar, inCodecParameters));
 			streamMapping[i] = outStreamIndex++;
 
 			const AVCodec* codec = avcodec_find_decoder(inCodecParameters->codec_id);
@@ -136,6 +134,21 @@ public:
 		ASSERT_TRUE(inputCodecContext != nullptr);
 		ASSERT_TRUE(avcodec_parameters_to_context(inputCodecContext, inputVideoCodecParameters) >= 0);
 		ASSERT_TRUE(avcodec_open2(inputCodecContext, inputVideoCodec, NULL) >= 0);
+	}
+
+	void init_output() {
+		avformat_alloc_output_context2(&outputFormatContext, NULL, NULL, output_filename.c_str());
+		ASSERT_TRUE(outputFormatContext != nullptr);
+
+		for (int i = 0; i < streamMapping.size(); i++) {
+			if (streamMapping[i] < 0) {
+				continue;
+			}
+			AVStream* inStream = inputFormatContext->streams[i];
+			AVStream* outStream = avformat_new_stream(outputFormatContext, NULL);
+			ASSERT_TRUE(outStream != nullptr);
+			AV_CALL(avcodec_parameters_copy(outStream->codecpar, inStream->codecpar));
+		}
 
 		if (c4::Logger::getLogLevel() >= c4::LOG_DEBUG) {
 			av_dump_format(outputFormatContext, 0, output_filename.c_str(), 1);
@@ -167,8 +180,16 @@ public:
 		AV_CALL(avformat_write_header(outputFormatContext, NULL));
 	}
 
-	void process(FrameProcessor& frame_processor) {
-		c4::progress_indicator progress(frameNumber, "Processing frames");
+	FfmpegVideoProcessor(const std::string& input_filename, const std::string& output_filename) : input_filename(input_filename), output_filename(output_filename) {
+	}
+
+	void process(FrameProcessor& frame_processor, bool preprocess) {
+		init_input();
+		if (!preprocess){
+			init_output();
+		}
+
+		c4::progress_indicator progress(frameNumber, preprocess ? "Pre-processing frames" : "Processing frames");
 
 		AVPacket packet;
 		while (av_read_frame(inputFormatContext, &packet) >= 0) {
@@ -178,20 +199,24 @@ public:
 			}
 
 			AVStream* inStream = inputFormatContext->streams[packet.stream_index];
-			AVStream* outStream = outputFormatContext->streams[packet.stream_index];
 
 			if (packet.stream_index == videoStreamIndex) {
 				AV_CALL(avcodec_send_packet(inputCodecContext, &packet));
 
 				AVFrame* frame = av_frame_alloc();
 				while(avcodec_receive_frame(inputCodecContext, frame) >= 0) {
-					frame_processor(frame);
-					frame->pict_type = AV_PICTURE_TYPE_NONE;
-					encode_frame(inStream, outStream, frame);
+					if (preprocess) {
+						frame_processor.preprocess(frame);
+					} else {
+						frame_processor.process(frame);
+						frame->pict_type = AV_PICTURE_TYPE_NONE;
+						encode_frame(inStream, outputFormatContext->streams[packet.stream_index], frame);
+					}
 					progress.did_some(1);
 				}
 				av_frame_unref(frame);
-			} else {
+			} else if (!preprocess) {
+				AVStream* outStream = outputFormatContext->streams[packet.stream_index];
 				packet.pts = av_rescale_q_rnd(packet.pts, inStream->time_base, outStream->time_base, AVRounding(AV_ROUND_NEAR_INF|AV_ROUND_PASS_MINMAX));
 				packet.dts = av_rescale_q_rnd(packet.dts, inStream->time_base, outStream->time_base, AVRounding(AV_ROUND_NEAR_INF | AV_ROUND_PASS_MINMAX));
 				packet.duration = av_rescale_q(packet.duration, inStream->time_base, outStream->time_base);
@@ -204,8 +229,14 @@ public:
 
 		progress.print_final();
 
-		encode_frame(inputFormatContext->streams[videoStreamIndex], outputFormatContext->streams[videoStreamIndex], nullptr);
-		av_write_trailer(outputFormatContext);
+		if (!preprocess) {
+			encode_frame(inputFormatContext->streams[videoStreamIndex], outputFormatContext->streams[videoStreamIndex], nullptr);
+			av_write_trailer(outputFormatContext);
+			avio_closep(&outputFormatContext->pb);
+			avformat_free_context(outputFormatContext);
+		}
+
+		avformat_close_input(&inputFormatContext);
 	}
 
 	void encode_frame(AVStream* inStream, AVStream* outStream, AVFrame* frame){
@@ -220,15 +251,6 @@ public:
 		av_packet_unref(output_packet);
 		av_packet_free(&output_packet);
 	}
-
-	~FfmpegVideoProcessor() {
-		avformat_close_input(&inputFormatContext);
-		
-		avio_closep(&outputFormatContext->pb);
-		avformat_free_context(outputFormatContext);
-	}
-
-private:
 };
 
 
@@ -236,10 +258,11 @@ class VidStabProcessor : public FfmpegVideoProcessor::FrameProcessor {
 	c4::VideoStabilization stabilizer;
 	const int downscale;
 	const double prezoom;
-	const bool autozoom;
+	const int autozoom;
 	const double zoomspeed;
 	double zoom;
 	SwsContext* sws_downscale_ctx = nullptr;
+	std::deque<c4::MotionDetector::Motion> preprocessed;
 
 	static std::vector<c4::rectangle<int>> downscale_rects(const std::vector<c4::rectangle<int>>& rects, int downscale) {
 		std::vector<c4::rectangle<int>> scaled;
@@ -249,20 +272,14 @@ class VidStabProcessor : public FfmpegVideoProcessor::FrameProcessor {
 		return scaled;
 	}
 public:
-	VidStabProcessor(const c4::VideoStabilization::Params& params, const std::vector<c4::rectangle<int>> ignore, int downscale, double prezoom, bool autozoom, double zoomspeed)
+	VidStabProcessor(const c4::VideoStabilization::Params& params, const std::vector<c4::rectangle<int>> ignore, int downscale, double prezoom, int autozoom, double zoomspeed)
 		: stabilizer(params, downscale_rects(ignore, downscale)), downscale(downscale), prezoom(prezoom), autozoom(autozoom), zoomspeed(zoomspeed), zoom(prezoom) {
 		ASSERT_GREATER_EQUAL(prezoom, 1.);
 		ASSERT_GREATER_EQUAL(zoomspeed, 0.);
 	}
-	
-	void operator()(AVFrame* src) override {
-        c4::scoped_timer timer("VidStabProcessor()");
 
-		ASSERT_TRUE(src != nullptr);
-		//PRINT_DEBUG(av_frame_is_writable(src));
-		AV_CALL(av_frame_make_writable(src));
-
-		const AVPixFmtDescriptor *pixdesc = av_pix_fmt_desc_get((AVPixelFormat)src->format);
+	c4::MotionDetector::Motion detect(AVFrame* src, const AVPixFmtDescriptor *pixdesc) {
+        c4::scoped_timer timer("VidStabProcessor::detect()");
 
 		c4::VideoStabilization::FramePtr frame = std::make_shared<c4::VideoStabilization::Frame>();
 
@@ -282,12 +299,42 @@ public:
 			ASSERT_EQUAL(ret, frame->height());
 		}
 
-		c4::MotionDetector::Motion motion = stabilizer.process(frame);
-		if (autozoom) {
-			zoom -= zoomspeed;
-			const double requiredZoom = motion.calc_fill_scale(*frame);
-			zoom = std::max(zoom, requiredZoom);
-			zoom = std::max(prezoom, zoom);
+		return stabilizer.process(frame);
+	}
+
+	void preprocess(AVFrame* src) override {
+		c4::MotionDetector::Motion motion = detect(src, av_pix_fmt_desc_get((AVPixelFormat)src->format));
+
+		ASSERT_EQUAL(autozoom, 2); // Rignt now we only need two-pass decoding for autozoom mode 2
+		zoom = std::max(zoom, motion.calc_fill_scale(src->height / downscale, src->width / downscale));
+
+		preprocessed.push_back(motion);
+	}
+
+	void process(AVFrame* src) override {
+        c4::scoped_timer timer("VidStabProcessor()");
+
+		ASSERT_TRUE(src != nullptr);
+		AV_CALL(av_frame_make_writable(src));
+
+		const AVPixFmtDescriptor *pixdesc = av_pix_fmt_desc_get((AVPixelFormat)src->format);
+		const int frameHeight = src->height / downscale;
+		const int frameWidth = src->width / downscale;
+
+		c4::MotionDetector::Motion motion;
+		if (!preprocessed.empty()) {
+			motion = preprocessed.front();
+			preprocessed.pop_front();
+		} else {
+			motion = detect(src, pixdesc);
+
+			if (autozoom) {
+				ASSERT_EQUAL(autozoom, 1); // In one-pass decoding we only support dynamic zoom
+				zoom -= zoomspeed;
+				const double requiredZoom = motion.calc_fill_scale(frameHeight, frameWidth);
+				zoom = std::max(zoom, requiredZoom);
+				zoom = std::max(prezoom, zoom);
+			}
 		}
 
 		motion.scale *= 1. / zoom;
@@ -302,8 +349,8 @@ public:
 			const int h = p ? AV_CEIL_RSHIFT(src->height, pixdesc->log2_chroma_h) : src->height;
 			const int w = p ? AV_CEIL_RSHIFT(src->width, pixdesc->log2_chroma_w) : src->width;
 			c4::MotionDetector::Motion planeSizeAdjustedMotion = motion;
-			planeSizeAdjustedMotion.shift.y *= (double)h / frame->height();
-			planeSizeAdjustedMotion.shift.x *= (double)w / frame->width();
+			planeSizeAdjustedMotion.shift.y *= (double)h / frameHeight;
+			planeSizeAdjustedMotion.shift.x *= (double)w / frameWidth;
 
 			if (pixdesc->comp[p].depth == 8) {
 				ASSERT_EQUAL(pixdesc->comp[p].step, 1);
@@ -341,7 +388,7 @@ int main(int argc, char* argv[]) {
 		auto outputCmdOpt = opts.add_required_free_arg<std::string>("output.mp4");
 		auto downscaleCmdOpt = opts.add_optional<int>("downscale", 2, "Downscale factor used for motion detection.");
 		auto prezoomCmdOpt = opts.add_optional<double>("prezoom", 1.0, "Pre-zoom the source this much (used to reduce boarders or dynamic zoom effect).");
-		auto autozoomCmdOpt = opts.add_flag("autozoom", "Enable automatic zooming to fill the resulting frame.");
+		auto autozoomCmdOpt = opts.add_optional<int>("autozoom", 0, "Automatic zooming to fill the resulting frame. 0 - disabled, 1 - dynamic zoom, 2 - static zoom, requires two-pass decoding.");
 		auto zoomspeedCmdOpt = opts.add_optional<double>("zoomspeed", 0.0, "Every frame zoom is decreased by this amount if the frame stays filled.");
 
 		auto xSmoothCmdOpt = opts.add_optional<int>("x_smooth", params.x_smooth, "How many frames should be used for horizontal motion smoothing.");
@@ -403,7 +450,10 @@ int main(int argc, char* argv[]) {
 		VidStabProcessor frameProcessor(params, ignoreRects, downscale, prezoomCmdOpt, autozoomCmdOpt, zoomspeedCmdOpt);
 
 		FfmpegVideoProcessor videoProcessor(inputFilename, outputFilename);
-		videoProcessor.process(frameProcessor);
+		if (autozoomCmdOpt == 2) {
+			videoProcessor.process(frameProcessor, true);
+		}
+		videoProcessor.process(frameProcessor, false);
     } catch (const std::exception& e) {
         std::cerr << e.what() << std::endl;
     }
