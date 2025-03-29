@@ -327,7 +327,10 @@ int main(int argc, char* argv[]) {
 		auto outputCmdOpt = opts.add_required_free_arg<std::string>("output.mp4");
 		auto downscaleCmdOpt = opts.add_optional<int>("downscale", 2, "Downscale factor used for motion detection.");
 
-		auto smoothCmdOpt = opts.add_optional<int>("smooth", params.q_length, "How many frames should be used for motion smoothing.");
+		auto xSmoothCmdOpt = opts.add_optional<int>("x_smooth", params.x_smooth, "How many frames should be used for horizontal motion smoothing.");
+		auto ySmoothCmdOpt = opts.add_optional<int>("y_smooth", params.y_smooth, "How many frames should be used for vertical motion smoothing.");
+		auto scaleSmoothCmdOpt = opts.add_optional<int>("scale_smooth", params.scale_smooth, "How many frames should be used for scale smoothing.");
+		auto alphaSmoothCmdOpt = opts.add_optional<int>("alpha_smooth", params.alpha_smooth, "How many frames should be used for rotation smoothing.");
 		auto blocksizeCmdOpt = opts.add_optional<int>("block_size", params.blockSize, "Block size in pixels (after downscale).");
 		auto maxShiftCmdOpt = opts.add_optional<int>("max_shift", params.maxShift, "Max shift in pixels (after downscale), should be <= block_size / 2.");
 		auto maxAlphaCmdOpt = opts.add_optional<double>("max_alpha", params.maxAlpha, "Max rotation angle of consecutive frames, in radians.");
@@ -354,7 +357,11 @@ int main(int argc, char* argv[]) {
 
 		const int downscale = downscaleCmdOpt;
 
-		params.q_length = smoothCmdOpt;
+		params.x_smooth = xSmoothCmdOpt;
+		params.y_smooth = ySmoothCmdOpt;
+		params.scale_smooth = scaleSmoothCmdOpt;
+		params.alpha_smooth = alphaSmoothCmdOpt;
+
 		params.blockSize = blocksizeCmdOpt;
 		params.maxShift = maxShiftCmdOpt;
 		params.maxAlpha = maxAlphaCmdOpt;
