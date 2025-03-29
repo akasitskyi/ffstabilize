@@ -304,7 +304,9 @@ public:
 				c4::matrix<uint8_t> srcPlaneCopy = planeRef;
 				planeSizeAdjustedMotion.apply(srcPlaneCopy, planeRef);
 			}else{
-				ASSERT_TRUE(pixdesc->comp[0].depth > 8 && pixdesc->comp[0].depth <= 16);
+				ASSERT_TRUE(pixdesc->comp[p].depth > 8 && pixdesc->comp[p].depth <= 16);
+				ASSERT_EQUAL(pixdesc->comp[p].offset, 0);
+				ASSERT_EQUAL(pixdesc->comp[p].step, 2);
 
 				c4::matrix_ref<uint16_t> planeRef(h, w, src->linesize[p] / 2, (uint16_t*)src->data[p]);
 				c4::matrix<uint16_t> srcPlaneCopy = planeRef;
