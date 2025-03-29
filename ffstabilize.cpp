@@ -235,6 +235,10 @@ private:
 class VidStabProcessor : public FfmpegVideoProcessor::FrameProcessor {
 	c4::VideoStabilization stabilizer;
 	const int downscale;
+	const double prezoom;
+	const bool autozoom;
+	const double zoomspeed;
+	double zoom;
 	SwsContext* sws_downscale_ctx = nullptr;
 
 	static std::vector<c4::rectangle<int>> downscale_rects(const std::vector<c4::rectangle<int>>& rects, int downscale) {
@@ -245,7 +249,10 @@ class VidStabProcessor : public FfmpegVideoProcessor::FrameProcessor {
 		return scaled;
 	}
 public:
-	VidStabProcessor(const c4::VideoStabilization::Params& params, const std::vector<c4::rectangle<int>> ignore, int downscale) : stabilizer(params, downscale_rects(ignore, downscale)), downscale(downscale) {
+	VidStabProcessor(const c4::VideoStabilization::Params& params, const std::vector<c4::rectangle<int>> ignore, int downscale, double prezoom, bool autozoom, double zoomspeed)
+		: stabilizer(params, downscale_rects(ignore, downscale)), downscale(downscale), prezoom(prezoom), autozoom(autozoom), zoomspeed(zoomspeed), zoom(prezoom) {
+		ASSERT_GREATER_EQUAL(prezoom, 1.);
+		ASSERT_GREATER_EQUAL(zoomspeed, 0.);
 	}
 	
 	void operator()(AVFrame* src) override {
@@ -276,6 +283,15 @@ public:
 		}
 
 		c4::MotionDetector::Motion motion = stabilizer.process(frame);
+		if (autozoom) {
+			zoom -= zoomspeed;
+			const double requiredZoom = motion.calc_fill_scale(*frame);
+			zoom = std::max(zoom, requiredZoom);
+			zoom = std::max(prezoom, zoom);
+		}
+
+		motion.scale *= 1. / zoom;
+		motion.shift *= 1. / zoom;
 
 		const int planes = pixdesc->nb_components;
 		ASSERT_EQUAL(planes, av_pix_fmt_count_planes((AVPixelFormat)src->format));
@@ -307,6 +323,7 @@ public:
 	}
 
 	~VidStabProcessor() override {
+		PRINT_DEBUG(zoom);
 		sws_freeContext(sws_downscale_ctx);
 	}
 };
@@ -323,6 +340,9 @@ int main(int argc, char* argv[]) {
 		auto inputCmdOpt = opts.add_required_free_arg<std::string>("input.mp4");
 		auto outputCmdOpt = opts.add_required_free_arg<std::string>("output.mp4");
 		auto downscaleCmdOpt = opts.add_optional<int>("downscale", 2, "Downscale factor used for motion detection.");
+		auto prezoomCmdOpt = opts.add_optional<double>("prezoom", 1.0, "Pre-zoom the source this much (used to reduce boarders or dynamic zoom effect).");
+		auto autozoomCmdOpt = opts.add_flag("autozoom", "Enable automatic zooming to fill the resulting frame.");
+		auto zoomspeedCmdOpt = opts.add_optional<double>("zoomspeed", 0.0, "Every frame zoom is decreased by this amount if the frame stays filled.");
 
 		auto xSmoothCmdOpt = opts.add_optional<int>("x_smooth", params.x_smooth, "How many frames should be used for horizontal motion smoothing.");
 		auto ySmoothCmdOpt = opts.add_optional<int>("y_smooth", params.y_smooth, "How many frames should be used for vertical motion smoothing.");
@@ -380,7 +400,7 @@ int main(int argc, char* argv[]) {
 
 		c4::image_dumper::getInstance().init("", false);
 
-		VidStabProcessor frameProcessor(params, ignoreRects, downscale);
+		VidStabProcessor frameProcessor(params, ignoreRects, downscale, prezoomCmdOpt, autozoomCmdOpt, zoomspeedCmdOpt);
 
 		FfmpegVideoProcessor videoProcessor(inputFilename, outputFilename);
 		videoProcessor.process(frameProcessor);
