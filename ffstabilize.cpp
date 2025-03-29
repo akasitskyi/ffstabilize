@@ -32,6 +32,7 @@ extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libavutil/pixdesc.h>
+#include <libswscale/swscale.h>
 }
 
 int av_check_err(int err, std::string filename, int line) {
@@ -77,6 +78,7 @@ public:
 	class FrameProcessor {
 	public:
 		virtual void operator()(AVFrame* src) = 0;
+		virtual ~FrameProcessor() = default;
 	};
 
 	FfmpegVideoProcessor(const std::string& input_filename, const std::string& output_filename) {
@@ -233,6 +235,7 @@ private:
 class VidStabProcessor : public FfmpegVideoProcessor::FrameProcessor {
 	c4::VideoStabilization stabilizer;
 	const int downscale;
+	SwsContext* sws_downscale_ctx = nullptr;
 
 	static std::vector<c4::rectangle<int>> downscale_rects(const std::vector<c4::rectangle<int>>& rects, int downscale) {
 		std::vector<c4::rectangle<int>> scaled;
@@ -259,30 +262,16 @@ public:
 		if (pixdesc->comp[0].depth == 8) {
 			c4::matrix_ref<uint8_t> m(src->height, src->width, src->linesize[0],  src->data[0]);
 			c4::downscale_bilinear_nx(m, *frame, downscale);
-			//c4::force_dump_image(*frame, "frame");
 		} else {
-			ASSERT_GREATER(pixdesc->comp[0].depth, 8);
-			ASSERT_LESS_EQUAL(pixdesc->comp[0].depth, 16);
-
-			ASSERT_EQUAL(pixdesc->comp[0].shift, 0);
-			ASSERT_EQUAL(pixdesc->comp[0].offset, 0);
-
-			const int shift = pixdesc->comp[0].depth - 8;
-
-			const int frameHeight = src->height / downscale;
-			const int frameWidth = src->width / downscale;
-			frame->resize(frameHeight, frameWidth);
-
-			// FIXME: rigth now we use nearest neighbor interpolation, should be bilinear, and should be optimized
-			for(int i = 0; i < frameHeight; i++) {
-				int i0 = i * downscale;
-				uint8_t* pdst = (*frame)[i];
-				const uint16_t* psrc = (const uint16_t*)(src->data[0] + i0 * src->linesize[0]);
-
-				for(int j = 0; j < frameWidth; j++) {
-					pdst[j] = psrc[downscale * j] >> shift;
-				}
+			frame->resize(src->height / downscale, src->width / downscale);
+			if (sws_downscale_ctx == nullptr) {
+				sws_downscale_ctx = sws_getContext(src->width, src->height, (AVPixelFormat)src->format, frame->width(), frame->height(), AV_PIX_FMT_GRAY8, SWS_AREA, 0, 0, 0);
+				ASSERT_TRUE(sws_downscale_ctx != nullptr);
 			}
+			uint8_t* dst_data[1] = { frame->data() };
+			int dst_stride[1] = { frame->stride() };
+			int ret = sws_scale(sws_downscale_ctx, src->data, src->linesize, 0, src->height, dst_data, dst_stride);
+			ASSERT_EQUAL(ret, frame->height());
 		}
 
 		c4::MotionDetector::Motion motion = stabilizer.process(frame);
@@ -313,6 +302,10 @@ public:
 				planeSizeAdjustedMotion.apply(srcPlaneCopy, planeRef);
 			}
 		}
+	}
+
+	~VidStabProcessor() override {
+		sws_freeContext(sws_downscale_ctx);
 	}
 };
 
