@@ -260,7 +260,8 @@ public:
 		c4::VideoStabilization::FramePtr frame = std::make_shared<c4::VideoStabilization::Frame>();
 
 		if (pixdesc->comp[0].depth == 8) {
-			c4::matrix_ref<uint8_t> m(src->height, src->width, src->linesize[0],  src->data[0]);
+			ASSERT_EQUAL(pixdesc->comp[0].step, 1);
+			c4::matrix_ref<uint8_t> m(src->height, src->width, src->linesize[0],  src->data[0] + pixdesc->comp[0].offset);
 			c4::downscale_bilinear_nx(m, *frame, downscale);
 		} else {
 			frame->resize(src->height / downscale, src->width / downscale);
@@ -289,15 +290,16 @@ public:
 			planeSizeAdjustedMotion.shift.x *= (double)w / frame->width();
 
 			if (pixdesc->comp[p].depth == 8) {
-				c4::matrix_ref<uint8_t> planeRef(h, w, src->linesize[p], src->data[p]);
+				ASSERT_EQUAL(pixdesc->comp[p].step, 1);
+
+				c4::matrix_ref<uint8_t> planeRef(h, w, src->linesize[p], src->data[p] + pixdesc->comp[p].offset);
 				c4::matrix<uint8_t> srcPlaneCopy = planeRef;
 				planeSizeAdjustedMotion.apply(srcPlaneCopy, planeRef);
 			}else{
 				ASSERT_TRUE(pixdesc->comp[p].depth > 8 && pixdesc->comp[p].depth <= 16);
-				ASSERT_EQUAL(pixdesc->comp[p].offset, 0);
 				ASSERT_EQUAL(pixdesc->comp[p].step, 2);
 
-				c4::matrix_ref<uint16_t> planeRef(h, w, src->linesize[p] / 2, (uint16_t*)src->data[p]);
+				c4::matrix_ref<uint16_t> planeRef(h, w, src->linesize[p] / 2, (uint16_t*)(src->data[p] + pixdesc->comp[p].offset));
 				c4::matrix<uint16_t> srcPlaneCopy = planeRef;
 				planeSizeAdjustedMotion.apply(srcPlaneCopy, planeRef);
 			}
