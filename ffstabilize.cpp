@@ -68,6 +68,7 @@ class FfmpegVideoProcessor {
 	AVCodecContext* inputCodecContext = nullptr;
 
 	const std::string output_filename;
+	const int64_t output_bitrate;
 	AVFormatContext* outputFormatContext = nullptr;
 	AVCodecContext* outputCodecContext = nullptr;
 
@@ -165,7 +166,7 @@ public:
 		outputCodecContext->width = inputCodecContext->width;
 		outputCodecContext->sample_aspect_ratio = inputCodecContext->sample_aspect_ratio;
 		outputCodecContext->pix_fmt = inputCodecContext->pix_fmt;
-		outputCodecContext->bit_rate = inputCodecContext->bit_rate;
+		outputCodecContext->bit_rate = output_bitrate ? output_bitrate : inputCodecContext->bit_rate;
 		outputCodecContext->time_base = av_inv_q(input_framerate);
 
 		AV_CALL(avcodec_open2(outputCodecContext, outputVideoCodec, NULL));
@@ -180,7 +181,7 @@ public:
 		AV_CALL(avformat_write_header(outputFormatContext, NULL));
 	}
 
-	FfmpegVideoProcessor(const std::string& input_filename, const std::string& output_filename) : input_filename(input_filename), output_filename(output_filename) {
+	FfmpegVideoProcessor(const std::string& input_filename, const std::string& output_filename, const int64_t output_bitrate) : input_filename(input_filename), output_filename(output_filename), output_bitrate(output_bitrate) {
 	}
 
 	void process(FrameProcessor& frame_processor, bool preprocess) {
@@ -252,7 +253,6 @@ public:
 		av_packet_free(&output_packet);
 	}
 };
-
 
 class VidStabProcessor : public FfmpegVideoProcessor::FrameProcessor {
 	c4::VideoStabilization stabilizer;
@@ -375,6 +375,38 @@ public:
 	}
 };
 
+int64_t parse_bitrate(const std::string& bitrate) {
+	if (bitrate.empty()) {
+		return 0;
+	}
+
+	int64_t v = 0;
+	try {
+		v = std::stoi(bitrate.substr(0, bitrate.size() - 1));
+	} catch (const std::exception& e) {
+		v = 0;
+	}
+
+	if (v <= 0 || std::to_string(v) != bitrate.substr(0, bitrate.size() - 1)) {
+		LOGW << "Invalid bitrate string: " << bitrate;
+		return 0;
+	}
+
+	switch (bitrate.back()) {
+	case 'k':
+		return v * 1000;
+	case 'M':
+		return v * 1000000;
+	case 'G':
+		return v * 1000000000;
+	default:
+		LOGW << "Invalid bitrate suffix: " << bitrate;
+		return 0;
+	}
+
+	return 0;
+}
+
 int main(int argc, char* argv[]) {
     try{
 		c4::Logger::setLogLevel(c4::LOG_INFO);
@@ -386,6 +418,7 @@ int main(int argc, char* argv[]) {
 		c4::cmd_opts opts;
 		auto inputCmdOpt = opts.add_required_free_arg<std::string>("input.mp4");
 		auto outputCmdOpt = opts.add_required_free_arg<std::string>("output.mp4");
+		auto bitrateCmdOpt = opts.add_optional<std::string>("bitrate", "2", "Target bitrate.");
 		auto downscaleCmdOpt = opts.add_optional<int>("downscale", 2, "Downscale factor used for motion detection.");
 		auto prezoomCmdOpt = opts.add_optional<double>("prezoom", 1.0, "Pre-zoom the source this much (used to reduce boarders or dynamic zoom effect).");
 		auto autozoomCmdOpt = opts.add_optional<int>("autozoom", 0, "Automatic zooming to fill the resulting frame. 0 - disabled, 1 - dynamic zoom, 2 - static zoom, requires two-pass decoding.");
@@ -416,8 +449,8 @@ int main(int argc, char* argv[]) {
 		}
 
 		const std::string inputFilename = inputCmdOpt;
-		LOGI << "Input file: " << inputFilename;
 		const std::string outputFilename = outputCmdOpt;
+		const int64_t bitrate = parse_bitrate(bitrateCmdOpt);
 
 		const int downscale = downscaleCmdOpt;
 
@@ -449,7 +482,7 @@ int main(int argc, char* argv[]) {
 
 		VidStabProcessor frameProcessor(params, ignoreRects, downscale, prezoomCmdOpt, autozoomCmdOpt, zoomspeedCmdOpt);
 
-		FfmpegVideoProcessor videoProcessor(inputFilename, outputFilename);
+		FfmpegVideoProcessor videoProcessor(inputFilename, outputFilename, bitrate);
 		if (autozoomCmdOpt == 2) {
 			videoProcessor.process(frameProcessor, true);
 		}
