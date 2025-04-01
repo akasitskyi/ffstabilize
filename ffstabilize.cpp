@@ -56,8 +56,10 @@ class FfmpegVideoProcessor {
 			int out_num_configs = 0;
 			avcodec_get_supported_config(NULL, codec, AV_CODEC_CONFIG_PIX_FORMAT, 0, (const void**)&pix_fmts, &out_num_configs);
 			for (int i = 0; i < out_num_configs; i++) {
-				if (pix_fmts[i] == px_fmt)
+				if (pix_fmts[i] == px_fmt){
+					PRINT_DEBUG(codec->name);
 					return codec;
+				}
 			}
 		}
 
@@ -182,14 +184,18 @@ public:
 	}
 
 	FfmpegVideoProcessor(const std::string& input_filename, const std::string& output_filename, const int64_t output_bitrate) : input_filename(input_filename), output_filename(output_filename), output_bitrate(output_bitrate) {
+		init_input();
+		init_output();
+	}
+
+	c4::matrix_dimensions get_frame_size() const {
+		c4::matrix_dimensions ret;
+		ret.height = inputCodecContext->height;
+		ret.width = inputCodecContext->width;
+		return ret;
 	}
 
 	void process(FrameProcessor& frame_processor, bool preprocess) {
-		init_input();
-		if (!preprocess){
-			init_output();
-		}
-
 		c4::progress_indicator progress(frameNumber, preprocess ? "Pre-processing frames" : "Processing frames");
 
 		AVPacket packet;
@@ -256,6 +262,7 @@ public:
 
 class VidStabProcessor : public FfmpegVideoProcessor::FrameProcessor {
 	c4::VideoStabilization stabilizer;
+	const std::vector<c4::rectangle<int>> ignoreRects;
 	const int downscale;
 	const double prezoom;
 	const int autozoom;
@@ -271,35 +278,33 @@ class VidStabProcessor : public FfmpegVideoProcessor::FrameProcessor {
 		}
 		return scaled;
 	}
-public:
-	VidStabProcessor(const c4::VideoStabilization::Params& params, const std::vector<c4::rectangle<int>> ignore, int downscale, double prezoom, int autozoom, double zoomspeed)
-		: stabilizer(params, downscale_rects(ignore, downscale)), downscale(downscale), prezoom(prezoom), autozoom(autozoom), zoomspeed(zoomspeed), zoom(prezoom) {
-		ASSERT_GREATER_EQUAL(prezoom, 1.);
-		ASSERT_GREATER_EQUAL(zoomspeed, 0.);
-	}
 
 	c4::MotionDetector::Motion detect(AVFrame* src, const AVPixFmtDescriptor *pixdesc) {
-        c4::scoped_timer timer("VidStabProcessor::detect()");
+		static c4::time_printer tp("VidStabProcessor::detect()", c4::LOG_DEBUG);
+        c4::scoped_timer timer(tp);
 
 		c4::VideoStabilization::FramePtr frame = std::make_shared<c4::VideoStabilization::Frame>();
 
-		if (pixdesc->comp[0].depth == 8) {
-			ASSERT_EQUAL(pixdesc->comp[0].step, 1);
-			c4::matrix_ref<uint8_t> m(src->height, src->width, src->linesize[0],  src->data[0] + pixdesc->comp[0].offset);
-			c4::downscale_bilinear_nx(m, *frame, downscale);
-		} else {
-			frame->resize(src->height / downscale, src->width / downscale);
-			if (sws_downscale_ctx == nullptr) {
-				sws_downscale_ctx = sws_getContext(src->width, src->height, (AVPixelFormat)src->format, frame->width(), frame->height(), AV_PIX_FMT_GRAY8, SWS_AREA, 0, 0, 0);
-				ASSERT_TRUE(sws_downscale_ctx != nullptr);
-			}
-			uint8_t* dst_data[1] = { frame->data() };
-			int dst_stride[1] = { frame->stride() };
-			int ret = sws_scale(sws_downscale_ctx, src->data, src->linesize, 0, src->height, dst_data, dst_stride);
-			ASSERT_EQUAL(ret, frame->height());
+		frame->resize(src->height / downscale, src->width / downscale);
+		if (sws_downscale_ctx == nullptr) {
+			sws_downscale_ctx = sws_getContext(src->width, src->height, (AVPixelFormat)src->format, frame->width(), frame->height(), AV_PIX_FMT_GRAY8, SWS_AREA, 0, 0, 0);
+			ASSERT_TRUE(sws_downscale_ctx != nullptr);
 		}
+		uint8_t* dst_data[1] = { frame->data() };
+		int dst_stride[1] = { frame->stride() };
+		int ret = sws_scale(sws_downscale_ctx, src->data, src->linesize, 0, src->height, dst_data, dst_stride);
+		ASSERT_EQUAL(ret, frame->height());
 
-		return stabilizer.process(frame);
+		const std::vector<c4::rectangle<int>> scaledIgnoreRects = downscale_rects(ignoreRects, downscale);
+
+		return stabilizer.process(frame, scaledIgnoreRects);
+	}
+
+public:
+	VidStabProcessor(const c4::VideoStabilization::Params& params, const std::vector<c4::rectangle<int>> ignoreRects, int downscale, double prezoom, int autozoom, double zoomspeed)
+		: stabilizer(params), downscale(downscale), ignoreRects(ignoreRects), prezoom(prezoom), autozoom(autozoom), zoomspeed(zoomspeed), zoom(prezoom) {
+		ASSERT_GREATER_EQUAL(prezoom, 1.);
+		ASSERT_GREATER_EQUAL(zoomspeed, 0.);
 	}
 
 	void preprocess(AVFrame* src) override {
@@ -419,7 +424,7 @@ int main(int argc, char* argv[]) {
 		auto inputCmdOpt = opts.add_required_free_arg<std::string>("input.mp4");
 		auto outputCmdOpt = opts.add_required_free_arg<std::string>("output.mp4");
 		auto bitrateCmdOpt = opts.add_optional<std::string>("bitrate", "2", "Target bitrate.");
-		auto downscaleCmdOpt = opts.add_optional<int>("downscale", 2, "Downscale factor used for motion detection.");
+		auto downscaleCmdOpt = opts.add_optional<int>("downscale", -1, "Downscale factor used for motion detection. Default value of -1 means automatic (based on resolution).");
 		auto prezoomCmdOpt = opts.add_optional<double>("prezoom", 1.0, "Pre-zoom the source this much (used to reduce boarders or dynamic zoom effect).");
 		auto autozoomCmdOpt = opts.add_optional<int>("autozoom", 0, "Automatic zooming to fill the resulting frame. 0 - disabled, 1 - dynamic zoom, 2 - static zoom, requires two-pass decoding.");
 		auto zoomspeedCmdOpt = opts.add_optional<double>("zoomspeed", 0.0, "Every frame zoom is decreased by this amount if the frame stays filled.");
@@ -452,8 +457,6 @@ int main(int argc, char* argv[]) {
 		const std::string outputFilename = outputCmdOpt;
 		const int64_t bitrate = parse_bitrate(bitrateCmdOpt);
 
-		const int downscale = downscaleCmdOpt;
-
 		params.x_smooth = xSmoothCmdOpt;
 		params.y_smooth = ySmoothCmdOpt;
 		params.scale_smooth = scaleSmoothCmdOpt;
@@ -480,11 +483,17 @@ int main(int argc, char* argv[]) {
 
 		c4::image_dumper::getInstance().init("", false);
 
+		FfmpegVideoProcessor videoProcessor(inputFilename, outputFilename, bitrate);
+
+		const int downscale = downscaleCmdOpt > 0 ? (int)downscaleCmdOpt : 1 + videoProcessor.get_frame_size().min() / 1000;
+
+		PRINT_DEBUG(downscale);
+
 		VidStabProcessor frameProcessor(params, ignoreRects, downscale, prezoomCmdOpt, autozoomCmdOpt, zoomspeedCmdOpt);
 
-		FfmpegVideoProcessor videoProcessor(inputFilename, outputFilename, bitrate);
 		if (autozoomCmdOpt == 2) {
 			videoProcessor.process(frameProcessor, true);
+			videoProcessor.init_input();
 		}
 		videoProcessor.process(frameProcessor, false);
     } catch (const std::exception& e) {
