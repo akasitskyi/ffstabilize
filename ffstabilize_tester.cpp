@@ -49,7 +49,7 @@ int test(const std::string& exe, const std::string& fin) {
 
 int main(int argc, char* argv[]) {
 	const std::string path = std::filesystem::path(argv[0]).parent_path().string();
-	const std::string exe = path + "/ffstabilize.exe";
+	const std::string exe = path + "/ffstabilize";
 
 	const std::vector<std::string> files {
 		"h246_720p_60fps.mp4",
