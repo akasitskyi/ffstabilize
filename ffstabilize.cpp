@@ -47,29 +47,12 @@ int av_check_err(int err, std::string filename, int line) {
 #define AV_CALL(x) av_check_err(x, __FILE__, __LINE__)
 
 class FfmpegVideoProcessor {
-	static const AVCodec* find_best_encoder(const std::vector<std::string>& names, const AVPixelFormat px_fmt){
-		for (const std::string& name : names) {
-			const AVCodec* codec = avcodec_find_encoder_by_name(name.c_str());
-			if (!codec)
-				continue;
-			const enum AVPixelFormat *pix_fmts = NULL;
-			int out_num_configs = 0;
-			avcodec_get_supported_config(NULL, codec, AV_CODEC_CONFIG_PIX_FORMAT, 0, (const void**)&pix_fmts, &out_num_configs);
-			for (int i = 0; i < out_num_configs; i++) {
-				if (pix_fmts[i] == px_fmt){
-					PRINT_DEBUG(codec->name);
-					return codec;
-				}
-			}
-		}
-
-		return nullptr;
-	}
 	const std::string input_filename;
 	AVFormatContext* inputFormatContext = nullptr;
 	AVCodecContext* inputCodecContext = nullptr;
 
 	const std::string output_filename;
+	const std::string output_codec;
 	const int64_t output_bitrate;
 	AVFormatContext* outputFormatContext = nullptr;
 	AVCodecContext* outputCodecContext = nullptr;
@@ -158,7 +141,7 @@ public:
 		}
 
 		AVRational input_framerate = av_guess_frame_rate(inputFormatContext, inputFormatContext->streams[videoStreamIndex], NULL);
-		const AVCodec* outputVideoCodec = find_best_encoder({"hevc_nvenc", "libx265", "libx264"}, inputCodecContext->pix_fmt);
+		const AVCodec* outputVideoCodec = avcodec_find_encoder_by_name(output_codec.c_str());
 		ASSERT_TRUE(outputVideoCodec != nullptr);
 
 		outputCodecContext = avcodec_alloc_context3(outputVideoCodec);
@@ -183,7 +166,8 @@ public:
 		AV_CALL(avformat_write_header(outputFormatContext, NULL));
 	}
 
-	FfmpegVideoProcessor(const std::string& input_filename, const std::string& output_filename, const int64_t output_bitrate) : input_filename(input_filename), output_filename(output_filename), output_bitrate(output_bitrate) {
+	FfmpegVideoProcessor(const std::string& input_filename, const std::string& output_filename, const int64_t output_bitrate, const std::string output_codec)
+		: input_filename(input_filename), output_filename(output_filename), output_bitrate(output_bitrate), output_codec(output_codec) {
 		init_input();
 		init_output();
 	}
@@ -424,6 +408,7 @@ int main(int argc, char* argv[]) {
 		auto inputCmdOpt = opts.add_required_free_arg<std::string>("input.mp4");
 		auto outputCmdOpt = opts.add_required_free_arg<std::string>("output.mp4");
 		auto bitrateCmdOpt = opts.add_optional<std::string>("bitrate", "2", "Target bitrate.");
+		auto codecCmdOpt = opts.add_optional<std::string>("codec", "libx265", "Output video codec. Default is libx265. You can use libx264, but you shouldn't. If you have nvidia drivers, you can try hevc_nvenc - it's faster, but has some pixel format limitations.");
 		auto downscaleCmdOpt = opts.add_optional<int>("downscale", -1, "Downscale factor used for motion detection. Default value of -1 means automatic (based on resolution).");
 		auto prezoomCmdOpt = opts.add_optional<double>("prezoom", 1.0, "Pre-zoom the source this much (used to reduce boarders or dynamic zoom effect).");
 		auto autozoomCmdOpt = opts.add_optional<int>("autozoom", 0, "Automatic zooming to fill the resulting frame. 0 - disabled, 1 - dynamic zoom, 2 - static zoom, requires two-pass decoding.");
@@ -483,7 +468,7 @@ int main(int argc, char* argv[]) {
 
 		c4::image_dumper::getInstance().init("", false);
 
-		FfmpegVideoProcessor videoProcessor(inputFilename, outputFilename, bitrate);
+		FfmpegVideoProcessor videoProcessor(inputFilename, outputFilename, bitrate, codecCmdOpt);
 
 		const int downscale = downscaleCmdOpt > 0 ? (int)downscaleCmdOpt : 1 + videoProcessor.get_frame_size().min() / 1000;
 
