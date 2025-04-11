@@ -306,24 +306,12 @@ public:
 		ASSERT_TRUE(autozoom);
 		ASSERT_TRUE(!prepZoom.empty());
 
-		std::priority_queue<std::pair<double, int>> pq;
-		for (int i : c4::range(prepZoom.size())) {
-			pq.emplace(prepZoom[i], i);
+		for (int i : c4::range(prepZoom.size()-1)) {
+			prepZoom[i + 1] = std::max(prepZoom[i + 1], prepZoom[i] / zoomSpeed);
 		}
 
-		// Calculate smooth zooming with Dijkstra's algorithm. This gives N log N complexity. Can be done in O(N) with BFS-like algorithm, but this is easier to implement.
-		while (!pq.empty()) {
-			const auto [zoom, i] = pq.top();
-			const double nZoom = zoom / zoomSpeed;
-			pq.pop();
-			if (i > 0 && prepZoom[i - 1] < nZoom) {
-				prepZoom[i - 1] = nZoom;
-				pq.emplace(nZoom, i - 1);
-			}
-			if (i + 1 < prepZoom.size() && prepZoom[i + 1] < nZoom) {
-				prepZoom[i + 1] = nZoom;
-				pq.emplace(nZoom, i + 1);
-			}
+		for (int i : c4::range(prepZoom.size()-1).reverse()) {
+			prepZoom[i] = std::max(prepZoom[i], prepZoom[i + 1] / zoomSpeed);
 		}
 	}
 
@@ -412,7 +400,7 @@ public:
 };
 
 static int64_t parse_bitrate(const std::string& bitrate) {
-	if (bitrate.empty()) {
+	if (bitrate == "0") {
 		return 0;
 	}
 
@@ -454,12 +442,12 @@ int main(int argc, char* argv[]) {
 		c4::cmd_opts opts;
 		auto inputCmdOpt = opts.add_required_free_arg<std::string>("input.mp4");
 		auto outputCmdOpt = opts.add_required_free_arg<std::string>("output.mp4");
-		auto bitrateCmdOpt = opts.add_optional<std::string>("bitrate", "2", "Target bitrate.");
+		auto bitrateCmdOpt = opts.add_optional<std::string>("bitrate", "0", "Target bitrate.");
 		auto codecCmdOpt = opts.add_optional<std::string>("codec", "libx265", "Output video codec. Default is libx265. You can use libx264, but you shouldn't. If you have nvidia drivers, you can try hevc_nvenc - it's faster, but has some pixel format limitations.");
 		auto downscaleCmdOpt = opts.add_optional<int>("downscale", -1, "Downscale factor used for motion detection. Default value of -1 means automatic (based on resolution).");
 		auto prezoomCmdOpt = opts.add_optional<double>("prezoom", 1.0, "Pre-zoom the source this much.");
 		auto autozoomCmdOpt = opts.add_flag("autozoom", "Automatic zooming to fill the resulting frame. Two-pass decoding is enabled if autozoom is on.");
-		auto zoomSpeedCmdOpt = opts.add_optional<double>("zoom_speed", 1.0, "The ratio of zooms of two consequtive frames will not be greater than this value. The value of 1.0 means static zoom.");
+		auto zoomSpeedCmdOpt = opts.add_optional<double>("zoom_speed", 1.0002, "The ratio of zooms of two consequtive frames will not be greater than this value. The value of 1.0 means static zoom. The deafault value of 1.0002 gives smooth almost invisible zoom.");
 
 		auto xSmoothCmdOpt = opts.add_optional<int>("x_smooth", params.x_smooth, "How many frames should be used for horizontal motion smoothing.");
 		auto ySmoothCmdOpt = opts.add_optional<int>("y_smooth", params.y_smooth, "How many frames should be used for vertical motion smoothing.");
