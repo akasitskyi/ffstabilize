@@ -307,11 +307,15 @@ public:
 		ASSERT_TRUE(!prepZoom.empty());
 
 		for (int i : c4::range(prepZoom.size()-1)) {
-			prepZoom[i + 1] = std::max(prepZoom[i + 1], prepZoom[i] / zoomSpeed);
+			if (preprocessed[i + 1].confidence > 0) { // skip scene cuts
+				prepZoom[i + 1] = std::max(prepZoom[i + 1], prepZoom[i] / zoomSpeed);
+			}
 		}
 
 		for (int i : c4::range(prepZoom.size()-1).reverse()) {
-			prepZoom[i] = std::max(prepZoom[i], prepZoom[i + 1] / zoomSpeed);
+			if (preprocessed[i + 1].confidence > 0) { // skip scene cuts
+				prepZoom[i] = std::max(prepZoom[i], prepZoom[i + 1] / zoomSpeed);
+			}
 		}
 	}
 
@@ -362,7 +366,7 @@ public:
 					c4::draw_string(planeRef, 20, 15, "frame " + c4::to_string(frameCounter++, 4), uint8_t(255), uint8_t(0), 2);
 
 					c4::draw_string(planeRef, 20, 45, "shift: " + c4::to_string(motion.shift.x, 2) + ", " + c4::to_string(motion.shift.y, 2)
-						+ ", scale: " + c4::to_string(motion.scale, 4)
+						+ ", scale: " + c4::to_string(motion.scale * zoom, 4)
 						+ ", alpha: " + c4::to_string(motion.alpha, 4), uint8_t(255), uint8_t(0), 2);
 
 					if (zoom != 1.) {
@@ -383,7 +387,7 @@ public:
 					c4::draw_string(planeRef, 20, 15, "frame " + c4::to_string(frameCounter++, 4), fg, bg, 2);
 
 					c4::draw_string(planeRef, 20, 45, "shift: " + c4::to_string(motion.shift.x, 2) + ", " + c4::to_string(motion.shift.y, 2)
-						+ ", scale: " + c4::to_string(motion.scale, 4)
+						+ ", scale: " + c4::to_string(motion.scale * zoom, 4)
 						+ ", alpha: " + c4::to_string(motion.alpha, 4), fg, bg, 2);
 
 					if (zoom != 1.) {
@@ -453,6 +457,7 @@ int main(int argc, char* argv[]) {
 		auto ySmoothCmdOpt = opts.add_optional<int>("y_smooth", params.y_smooth, "How many frames should be used for vertical motion smoothing.");
 		auto scaleSmoothCmdOpt = opts.add_optional<int>("scale_smooth", params.scale_smooth, "How many frames should be used for scale smoothing.");
 		auto alphaSmoothCmdOpt = opts.add_optional<int>("alpha_smooth", params.alpha_smooth, "How many frames should be used for rotation smoothing.");
+		auto sceneCutThresholdCmdOpt = opts.add_optional<double>("scene_cut_threshold", params.scene_cut_threshold, "Motion detection confidence threshold for scene cut detection.");
 		auto blocksizeCmdOpt = opts.add_optional<int>("block_size", params.blockSize, "Block size in pixels (after downscale).");
 		auto maxShiftCmdOpt = opts.add_optional<int>("max_shift", params.maxShift, "Max shift in pixels (after downscale), should be <= block_size / 2.");
 		auto maxAlphaCmdOpt = opts.add_optional<double>("max_alpha", params.maxAlpha, "Max rotation angle of consecutive frames, in radians.");
@@ -482,6 +487,7 @@ int main(int argc, char* argv[]) {
 		params.y_smooth = ySmoothCmdOpt;
 		params.scale_smooth = scaleSmoothCmdOpt;
 		params.alpha_smooth = alphaSmoothCmdOpt;
+		params.scene_cut_threshold = sceneCutThresholdCmdOpt;
 
 		params.blockSize = blocksizeCmdOpt;
 		params.maxShift = maxShiftCmdOpt;
