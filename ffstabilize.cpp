@@ -35,7 +35,7 @@ extern "C" {
 #include <libswscale/swscale.h>
 }
 
-int av_check_err(int err, std::string filename, int line) {
+static int av_check_err(int err, std::string filename, int line) {
 	if (err < 0) {
 		char errbuf[AV_ERROR_MAX_STRING_SIZE]{};
 		av_make_error_string(errbuf, AV_ERROR_MAX_STRING_SIZE, err);
@@ -173,9 +173,7 @@ public:
 	}
 
 	c4::matrix_dimensions get_frame_size() const {
-		c4::matrix_dimensions ret;
-		ret.height = inputCodecContext->height;
-		ret.width = inputCodecContext->width;
+		c4::matrix_dimensions ret{ .height = inputCodecContext->height, .width = inputCodecContext->width };
 		return ret;
 	}
 
@@ -249,11 +247,14 @@ class VidStabProcessor : public FfmpegVideoProcessor::FrameProcessor {
 	const std::vector<c4::rectangle<int>> ignoreRects;
 	const int downscale;
 	const double prezoom;
-	const int autozoom;
-	const double zoomspeed;
-	double zoom;
+	const bool autozoom;
+	const double zoomSpeed;
+	const bool debugImprint;
+
+	int frameCounter = 0;
 	SwsContext* sws_downscale_ctx = nullptr;
 	std::deque<c4::MotionDetector::Motion> preprocessed;
+	std::deque<double> prepZoom;
 
 	static std::vector<c4::rectangle<int>> downscale_rects(const std::vector<c4::rectangle<int>>& rects, int downscale) {
 		std::vector<c4::rectangle<int>> scaled;
@@ -285,19 +286,45 @@ class VidStabProcessor : public FfmpegVideoProcessor::FrameProcessor {
 	}
 
 public:
-	VidStabProcessor(const c4::VideoStabilization::Params& params, const std::vector<c4::rectangle<int>> ignoreRects, int downscale, double prezoom, int autozoom, double zoomspeed)
-		: stabilizer(params), downscale(downscale), ignoreRects(ignoreRects), prezoom(prezoom), autozoom(autozoom), zoomspeed(zoomspeed), zoom(prezoom) {
+	VidStabProcessor(const c4::VideoStabilization::Params& params, const std::vector<c4::rectangle<int>> ignoreRects, int downscale, double prezoom, bool autozoom, double zoomSpeed, bool debugImprint)
+		: stabilizer(params), downscale(downscale), ignoreRects(ignoreRects), prezoom(prezoom), autozoom(autozoom), zoomSpeed(zoomSpeed), debugImprint(debugImprint) {
 		ASSERT_GREATER_EQUAL(prezoom, 1.);
-		ASSERT_GREATER_EQUAL(zoomspeed, 0.);
+		ASSERT_GREATER_EQUAL(zoomSpeed, 1.);
 	}
 
 	void preprocess(AVFrame* src) override {
 		c4::MotionDetector::Motion motion = detect(src, av_pix_fmt_desc_get((AVPixelFormat)src->format));
 
-		ASSERT_EQUAL(autozoom, 2); // Rignt now we only need two-pass decoding for autozoom mode 2
-		zoom = std::max(zoom, motion.calc_fill_scale(src->height / downscale, src->width / downscale));
+		ASSERT_TRUE(autozoom);
+		const double zoom = motion.calc_fill_scale(src->height / downscale, src->width / downscale);
 
 		preprocessed.push_back(motion);
+		prepZoom.push_back(std::max(zoom, prezoom));
+	}
+
+	void smoothen_zoom(){
+		ASSERT_TRUE(autozoom);
+		ASSERT_TRUE(!prepZoom.empty());
+
+		std::priority_queue<std::pair<double, int>> pq;
+		for (int i : c4::range(prepZoom.size())) {
+			pq.emplace(prepZoom[i], i);
+		}
+
+		// Calculate smooth zooming with Dijkstra's algorithm. This gives N log N complexity. Can be done in O(N) with BFS-like algorithm, but this is easier to implement.
+		while (!pq.empty()) {
+			const auto [zoom, i] = pq.top();
+			const double nZoom = zoom / zoomSpeed;
+			pq.pop();
+			if (i > 0 && prepZoom[i - 1] < nZoom) {
+				prepZoom[i - 1] = nZoom;
+				pq.emplace(nZoom, i - 1);
+			}
+			if (i + 1 < prepZoom.size() && prepZoom[i + 1] < nZoom) {
+				prepZoom[i + 1] = nZoom;
+				pq.emplace(nZoom, i + 1);
+			}
+		}
 	}
 
 	void process(AVFrame* src) override {
@@ -311,19 +338,14 @@ public:
 		const int frameWidth = src->width / downscale;
 
 		c4::MotionDetector::Motion motion;
+		double zoom = prezoom;
 		if (!preprocessed.empty()) {
 			motion = preprocessed.front();
 			preprocessed.pop_front();
+			zoom = prepZoom.front();
+			prepZoom.pop_front();
 		} else {
 			motion = detect(src, pixdesc);
-
-			if (autozoom) {
-				ASSERT_EQUAL(autozoom, 1); // In one-pass decoding we only support dynamic zoom
-				zoom -= zoomspeed;
-				const double requiredZoom = motion.calc_fill_scale(frameHeight, frameWidth);
-				zoom = std::max(zoom, requiredZoom);
-				zoom = std::max(prezoom, zoom);
-			}
 		}
 
 		motion.scale *= 1. / zoom;
@@ -347,6 +369,18 @@ public:
 				c4::matrix_ref<uint8_t> planeRef(h, w, src->linesize[p], src->data[p] + pixdesc->comp[p].offset);
 				c4::matrix<uint8_t> srcPlaneCopy = planeRef;
 				planeSizeAdjustedMotion.apply(srcPlaneCopy, planeRef);
+
+				if (p == 0 && debugImprint) {
+					c4::draw_string(planeRef, 20, 15, "frame " + c4::to_string(frameCounter++, 4), uint8_t(255), uint8_t(0), 2);
+
+					c4::draw_string(planeRef, 20, 45, "shift: " + c4::to_string(motion.shift.x, 2) + ", " + c4::to_string(motion.shift.y, 2)
+						+ ", scale: " + c4::to_string(motion.scale, 4)
+						+ ", alpha: " + c4::to_string(motion.alpha, 4), uint8_t(255), uint8_t(0), 2);
+
+					if (zoom != 1.) {
+						c4::draw_string(planeRef, 20, 75, "zoom: " + c4::to_string(zoom, 4), uint8_t(255), uint8_t(0), 2);
+					}
+				}
 			}else{
 				ASSERT_TRUE(pixdesc->comp[p].depth > 8 && pixdesc->comp[p].depth <= 16);
 				ASSERT_EQUAL(pixdesc->comp[p].step, 2);
@@ -354,17 +388,30 @@ public:
 				c4::matrix_ref<uint16_t> planeRef(h, w, src->linesize[p] / 2, (uint16_t*)(src->data[p] + pixdesc->comp[p].offset));
 				c4::matrix<uint16_t> srcPlaneCopy = planeRef;
 				planeSizeAdjustedMotion.apply(srcPlaneCopy, planeRef);
+
+				if (p == 0 && debugImprint) {
+					const uint16_t fg = (1 << pixdesc->comp[p].depth) - 1;
+					const uint16_t bg = 0;
+					c4::draw_string(planeRef, 20, 15, "frame " + c4::to_string(frameCounter++, 4), fg, bg, 2);
+
+					c4::draw_string(planeRef, 20, 45, "shift: " + c4::to_string(motion.shift.x, 2) + ", " + c4::to_string(motion.shift.y, 2)
+						+ ", scale: " + c4::to_string(motion.scale, 4)
+						+ ", alpha: " + c4::to_string(motion.alpha, 4), fg, bg, 2);
+
+					if (zoom != 1.) {
+						c4::draw_string(planeRef, 20, 75, "zoom: " + c4::to_string(zoom, 4), fg, bg, 2);
+					}
+				}
 			}
 		}
 	}
 
 	~VidStabProcessor() override {
-		PRINT_DEBUG(zoom);
 		sws_freeContext(sws_downscale_ctx);
 	}
 };
 
-int64_t parse_bitrate(const std::string& bitrate) {
+static int64_t parse_bitrate(const std::string& bitrate) {
 	if (bitrate.empty()) {
 		return 0;
 	}
@@ -410,9 +457,9 @@ int main(int argc, char* argv[]) {
 		auto bitrateCmdOpt = opts.add_optional<std::string>("bitrate", "2", "Target bitrate.");
 		auto codecCmdOpt = opts.add_optional<std::string>("codec", "libx265", "Output video codec. Default is libx265. You can use libx264, but you shouldn't. If you have nvidia drivers, you can try hevc_nvenc - it's faster, but has some pixel format limitations.");
 		auto downscaleCmdOpt = opts.add_optional<int>("downscale", -1, "Downscale factor used for motion detection. Default value of -1 means automatic (based on resolution).");
-		auto prezoomCmdOpt = opts.add_optional<double>("prezoom", 1.0, "Pre-zoom the source this much (used to reduce boarders or dynamic zoom effect).");
-		auto autozoomCmdOpt = opts.add_optional<int>("autozoom", 0, "Automatic zooming to fill the resulting frame. 0 - disabled, 1 - dynamic zoom, 2 - static zoom, requires two-pass decoding.");
-		auto zoomspeedCmdOpt = opts.add_optional<double>("zoomspeed", 0.0, "Every frame zoom is decreased by this amount if the frame stays filled.");
+		auto prezoomCmdOpt = opts.add_optional<double>("prezoom", 1.0, "Pre-zoom the source this much.");
+		auto autozoomCmdOpt = opts.add_flag("autozoom", "Automatic zooming to fill the resulting frame. Two-pass decoding is enabled if autozoom is on.");
+		auto zoomSpeedCmdOpt = opts.add_optional<double>("zoom_speed", 1.0, "The ratio of zooms of two consequtive frames will not be greater than this value. The value of 1.0 means static zoom.");
 
 		auto xSmoothCmdOpt = opts.add_optional<int>("x_smooth", params.x_smooth, "How many frames should be used for horizontal motion smoothing.");
 		auto ySmoothCmdOpt = opts.add_optional<int>("y_smooth", params.y_smooth, "How many frames should be used for vertical motion smoothing.");
@@ -426,6 +473,7 @@ int main(int argc, char* argv[]) {
 		auto ignoreCmdOpt = opts.add_multiple("ignore", "Add rectangle where motion should be ignored. Format: \"x, y, w, h\".");
 
 		auto debugCmdOpt = opts.add_flag("debug", "Enable debug output.");
+		auto debugImprintCmdOpt = opts.add_flag("debug_imprint", "Enable motion info imprint on the output video.");
 		auto verboseCmdOpt = opts.add_flag("verbose", "Enable verbose output.");
 
 		opts.parse(argc, argv);
@@ -474,10 +522,11 @@ int main(int argc, char* argv[]) {
 
 		PRINT_DEBUG(downscale);
 
-		VidStabProcessor frameProcessor(params, ignoreRects, downscale, prezoomCmdOpt, autozoomCmdOpt, zoomspeedCmdOpt);
+		VidStabProcessor frameProcessor(params, ignoreRects, downscale, prezoomCmdOpt, autozoomCmdOpt, zoomSpeedCmdOpt, debugImprintCmdOpt);
 
-		if (autozoomCmdOpt == 2) {
+		if (autozoomCmdOpt) {
 			videoProcessor.process(frameProcessor, true);
+			frameProcessor.smoothen_zoom();
 			videoProcessor.init_input();
 		}
 		videoProcessor.process(frameProcessor, false);
