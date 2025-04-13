@@ -303,63 +303,73 @@ public:
 	}
 
 	void optimize_zoom(){
-		double a_min = 0;
-		double a_max = 0;
-		for (const auto& m : preprocessed) {
-			a_min = std::min(a_min, m.alpha);
-			a_max = std::max(a_max, m.alpha);
-		}
-
-		const double a_offset = (a_min + a_max) / 2;
-		PRINT_DEBUG(a_offset);
-
-		c4::MotionDetector::Motion a_motion{ .alpha = -a_offset };
-
-		for (auto& m : preprocessed) {
-			auto m1 = a_motion.combine(m);
-			m1.confidence = m.confidence;
-			m = m1;
-		}
-
-		double x_min = 0;
-		double x_max = 0;
-		double y_min = 0;
-		double y_max = 0;
-
-		for (const auto& m : preprocessed) {
-			const auto fill = m.calc_fill(workHeight, workWidth);
-			x_min = std::min(x_min, fill.x_min);
-			x_max = std::max(x_max, fill.x_max);
-			y_min = std::min(y_min, fill.y_min);
-			y_max = std::max(y_max, fill.y_max);
-		}
-
-		const c4::point<double> offset {(x_min + x_max) / 2, (y_min + y_max) / 2};
-
-		PRINT_DEBUG(offset);
-
-		ASSERT_TRUE(prepZoom.empty());
-
-		for (auto& m : preprocessed) {
-			m.shift -= offset;
-			const double zoom = m.calc_fill(workHeight, workWidth).scale;
-			prepZoom.push_back(std::max(zoom, prezoom));
-		}
-
-		ASSERT_TRUE(autozoom);
-		ASSERT_TRUE(!prepZoom.empty());
-
-		for (int i : c4::range(prepZoom.size()-1)) {
-			if (preprocessed[i + 1].confidence > 0) { // skip scene cuts
-				prepZoom[i + 1] = std::max(prepZoom[i + 1], prepZoom[i] / zoomSpeed);
+		std::vector<int> cuts;
+		cuts.push_back(0);
+		for (int i : c4::range(preprocessed)) {
+			if (preprocessed[i].confidence == 0) {
+				cuts.push_back(i);
 			}
 		}
 
-		for (int i : c4::range(prepZoom.size()-1).reverse()) {
-			if (preprocessed[i + 1].confidence > 0) { // skip scene cuts
+		cuts.push_back(preprocessed.size());
+
+		cuts.erase(std::unique(cuts.begin(), cuts.end()), cuts.end());
+
+		PRINT_DEBUG(cuts);
+
+		for (int k : c4::range(cuts.size() - 1)) {
+			const int begin = cuts[k];
+			const int end = cuts[k + 1];
+			const c4::range range(begin, end);
+
+			double a_min = 0;
+			double a_max = 0;
+			for (int i : range) {
+				a_min = std::min(a_min, preprocessed[i].alpha);
+				a_max = std::max(a_max, preprocessed[i].alpha);
+			}
+			const double a_offset = (a_min + a_max) / 2;
+			PRINT_DEBUG(a_offset);
+			c4::MotionDetector::Motion a_motion{ .alpha = -a_offset };
+			for (int i : range) {
+				auto m1 = a_motion.combine(preprocessed[i]);
+				m1.confidence = preprocessed[i].confidence;
+				preprocessed[i] = m1;
+			}
+
+			double x_min = 0;
+			double x_max = 0;
+			double y_min = 0;
+			double y_max = 0;
+
+			for (int i : range) {
+				const auto fill = preprocessed[i].calc_fill(workHeight, workWidth);
+				x_min = std::min(x_min, fill.x_min);
+				x_max = std::max(x_max, fill.x_max);
+				y_min = std::min(y_min, fill.y_min);
+				y_max = std::max(y_max, fill.y_max);
+			}
+
+			const c4::point<double> offset {(x_min + x_max) / 2, (y_min + y_max) / 2};
+
+			PRINT_DEBUG(offset);
+
+			for (int i : range) {
+				preprocessed[i].shift -= offset;
+				const double zoom = preprocessed[i].calc_fill(workHeight, workWidth).scale;
+				prepZoom.push_back(std::max(zoom, prezoom));
+			}
+
+			for (int i : c4::range(begin, end-1)) {
+				prepZoom[i + 1] = std::max(prepZoom[i + 1], prepZoom[i] / zoomSpeed);
+			}
+
+			for (int i : c4::range(begin, end-1).reverse()) {
 				prepZoom[i] = std::max(prepZoom[i], prepZoom[i + 1] / zoomSpeed);
 			}
 		}
+
+		ASSERT_EQUAL(prepZoom.size(), preprocessed.size());
 
 		const double maxZoom = *std::max_element(prepZoom.begin(), prepZoom.end());
 		PRINT_DEBUG(maxZoom);
