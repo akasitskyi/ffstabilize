@@ -1,11 +1,16 @@
 cmake_minimum_required(VERSION 3.28)
-project( ffstabilize )
+project( ffstabilize VERSION 0.0.0)
 
 set (CMAKE_CXX_STANDARD 20)
 
 if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
 endif()
+
+set(CPACK_PACKAGE_VENDOR "Alex Kasitskyi")
+
+add_definitions( -DPROJECT_VERSION="${CMAKE_PROJECT_VERSION}" )
+add_definitions( -DPROJECT_VENDOR="${CPACK_PACKAGE_VENDOR}" )
 
 if(UNIX)
     if(${CMAKE_SYSTEM_PROCESSOR} MATCHES "arm")
@@ -71,11 +76,6 @@ else()
 	install(DIRECTORY "${FFMPEG}/lib" DESTINATION .)
 	install(FILES "${FFMPEG}/LICENSE.txt" DESTINATION .)
 endif()
-
-set(CPACK_PACKAGE_VENDOR "Alex Kasitskyi")
-set(CPACK_PACKAGE_VERSION_MAJOR 0)
-set(CPACK_PACKAGE_VERSION_MINOR 0)
-set(CPACK_PACKAGE_VERSION_PATCH 0)
 
 set(CPACK_WIX_VERSION 4)
 set(CPACK_PACKAGE_INSTALL_DIRECTORY "ffstabilize")

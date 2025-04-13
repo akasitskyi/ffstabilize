@@ -513,6 +513,14 @@ int main(int argc, char* argv[]) {
 		auto debugImprintCmdOpt = opts.add_flag("debug_imprint", "Enable motion info imprint on the output video.");
 		auto verboseCmdOpt = opts.add_flag("verbose", "Enable verbose output.");
 
+		opts.set_package("ffstabilize");
+#ifdef PROJECT_VERSION
+		opts.set_version(PROJECT_VERSION);
+#endif
+#ifdef PROJECT_VENDOR
+		opts.set_vendor(PROJECT_VENDOR);
+#endif
+
 		opts.parse(argc, argv);
 
 		if (debugCmdOpt) {
