@@ -5,11 +5,11 @@ Very fast command line video stabilization tool, based on ffmpeg libav for video
 ## Windows
 <b>Option 1</b>. Download and install ffstabilize-\*-win64.msi from the latest release. This will put ffstabilize folder to the system PATH, so you can run ffstabilize from any directory.\
 <b>Option 2</b>. Download ffstabilize-\*-win64.zip from the latest release. Then you can extract it wherever you want and not have it in the system PATH. Run ffstabilize.exe from it.\
-<b>Option 3</b>. Build from sources. You will need CMake and MSVC. Should be pretty straightforward from there.\
+<b>Option 3</b>. Build from sources. You will need CMake and MSVC. Should be pretty straightforward from there.
 
 ## Linux
 <b>Option 1</b>. Download ffstabilize-\*-Linux.zip from the latest release. Extract the archive and run ./ffstabilize from the root folder. It's a bash script that sets proper LD_LIBRARY_PATH.\
-<b>Option 2</b>. Build from sources. You will need CMake and g++. Should be pretty straightforward from there.\
+<b>Option 2</b>. Build from sources. You will need CMake and g++. Should be pretty straightforward from there.
 
 # Usage
 The app has --help so you should be able to use it ;) I will explain optional parameters below.
