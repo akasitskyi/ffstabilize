@@ -303,6 +303,24 @@ public:
 	}
 
 	void optimize_zoom(){
+		double a_min = 0;
+		double a_max = 0;
+		for (const auto& m : preprocessed) {
+			a_min = std::min(a_min, m.alpha);
+			a_max = std::max(a_max, m.alpha);
+		}
+
+		const double a_offset = (a_min + a_max) / 2;
+		PRINT_DEBUG(a_offset);
+
+		c4::MotionDetector::Motion a_motion{ .alpha = -a_offset };
+
+		for (auto& m : preprocessed) {
+			auto m1 = a_motion.combine(m);
+			m1.confidence = m.confidence;
+			m = m1;
+		}
+
 		double x_min = 0;
 		double x_max = 0;
 		double y_min = 0;
@@ -342,6 +360,9 @@ public:
 				prepZoom[i] = std::max(prepZoom[i], prepZoom[i + 1] / zoomSpeed);
 			}
 		}
+
+		const double maxZoom = *std::max_element(prepZoom.begin(), prepZoom.end());
+		PRINT_DEBUG(maxZoom);
 	}
 
 	void process(AVFrame* src) override {
