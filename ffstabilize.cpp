@@ -244,8 +244,12 @@ public:
 
 class VidStabProcessor : public FfmpegVideoProcessor::FrameProcessor {
 	c4::VideoStabilization stabilizer;
-	const std::vector<c4::rectangle<int>> ignoreRects;
+	const int frameWidth;
+	const int frameHeight;
 	const int downscale;
+	const int workWidth;
+	const int workHeight;
+	const std::vector<c4::rectangle<int>> ignoreRects;
 	const double prezoom;
 	const bool autozoom;
 	const double zoomSpeed;
@@ -270,7 +274,7 @@ class VidStabProcessor : public FfmpegVideoProcessor::FrameProcessor {
 
 		c4::VideoStabilization::FramePtr frame = std::make_shared<c4::VideoStabilization::Frame>();
 
-		frame->resize(src->height / downscale, src->width / downscale);
+		frame->resize(workHeight, workWidth);
 		if (sws_downscale_ctx == nullptr) {
 			sws_downscale_ctx = sws_getContext(src->width, src->height, (AVPixelFormat)src->format, frame->width(), frame->height(), AV_PIX_FMT_GRAY8, SWS_AREA, 0, 0, 0);
 			ASSERT_TRUE(sws_downscale_ctx != nullptr);
@@ -286,8 +290,8 @@ class VidStabProcessor : public FfmpegVideoProcessor::FrameProcessor {
 	}
 
 public:
-	VidStabProcessor(const c4::VideoStabilization::Params& params, const std::vector<c4::rectangle<int>> ignoreRects, int downscale, double prezoom, bool autozoom, double zoomSpeed, bool debugImprint)
-		: stabilizer(params), downscale(downscale), ignoreRects(ignoreRects), prezoom(prezoom), autozoom(autozoom), zoomSpeed(zoomSpeed), debugImprint(debugImprint) {
+	VidStabProcessor(const c4::VideoStabilization::Params& params, int frameWidth, int frameHeight, int downscale, const std::vector<c4::rectangle<int>> ignoreRects, double prezoom, bool autozoom, double zoomSpeed, bool debugImprint)
+		: stabilizer(params), frameWidth(frameWidth), frameHeight(frameHeight), downscale(downscale), workWidth(frameWidth / downscale), workHeight(frameHeight / downscale), ignoreRects(ignoreRects), prezoom(prezoom), autozoom(autozoom), zoomSpeed(zoomSpeed), debugImprint(debugImprint) {
 		ASSERT_GREATER_EQUAL(prezoom, 1.);
 		ASSERT_GREATER_EQUAL(zoomSpeed, 1.);
 	}
@@ -295,14 +299,35 @@ public:
 	void preprocess(AVFrame* src) override {
 		c4::MotionDetector::Motion motion = detect(src, av_pix_fmt_desc_get((AVPixelFormat)src->format));
 
-		ASSERT_TRUE(autozoom);
-		const double zoom = motion.calc_fill_scale(src->height / downscale, src->width / downscale);
-
 		preprocessed.push_back(motion);
-		prepZoom.push_back(std::max(zoom, prezoom));
 	}
 
-	void smoothen_zoom(){
+	void optimize_zoom(){
+		double x_min = 0;
+		double x_max = 0;
+		double y_min = 0;
+		double y_max = 0;
+
+		for (const auto& m : preprocessed) {
+			const auto fill = m.calc_fill(workHeight, workWidth);
+			x_min = std::min(x_min, fill.x_min);
+			x_max = std::max(x_max, fill.x_max);
+			y_min = std::min(y_min, fill.y_min);
+			y_max = std::max(y_max, fill.y_max);
+		}
+
+		const c4::point<double> offset {(x_min + x_max) / 2, (y_min + y_max) / 2};
+
+		PRINT_DEBUG(offset);
+
+		ASSERT_TRUE(prepZoom.empty());
+
+		for (auto& m : preprocessed) {
+			m.shift -= offset;
+			const double zoom = m.calc_fill(workHeight, workWidth).scale;
+			prepZoom.push_back(std::max(zoom, prezoom));
+		}
+
 		ASSERT_TRUE(autozoom);
 		ASSERT_TRUE(!prepZoom.empty());
 
@@ -326,8 +351,6 @@ public:
 		AV_CALL(av_frame_make_writable(src));
 
 		const AVPixFmtDescriptor *pixdesc = av_pix_fmt_desc_get((AVPixelFormat)src->format);
-		const int frameHeight = src->height / downscale;
-		const int frameWidth = src->width / downscale;
 
 		c4::MotionDetector::Motion motion;
 		double zoom = prezoom;
@@ -352,8 +375,8 @@ public:
 			const int h = p ? AV_CEIL_RSHIFT(src->height, pixdesc->log2_chroma_h) : src->height;
 			const int w = p ? AV_CEIL_RSHIFT(src->width, pixdesc->log2_chroma_w) : src->width;
 			c4::MotionDetector::Motion planeSizeAdjustedMotion = motion;
-			planeSizeAdjustedMotion.shift.y *= (double)h / frameHeight;
-			planeSizeAdjustedMotion.shift.x *= (double)w / frameWidth;
+			planeSizeAdjustedMotion.shift.y *= (double)h / workHeight;
+			planeSizeAdjustedMotion.shift.x *= (double)w / workWidth;
 
 			if (pixdesc->comp[p].depth == 8) {
 				ASSERT_EQUAL(pixdesc->comp[p].step, 1);
@@ -512,15 +535,17 @@ int main(int argc, char* argv[]) {
 
 		FfmpegVideoProcessor videoProcessor(inputFilename, outputFilename, bitrate, codecCmdOpt);
 
-		const int downscale = downscaleCmdOpt > 0 ? (int)downscaleCmdOpt : 1 + videoProcessor.get_frame_size().min() / 1000;
+		const auto frameSize = videoProcessor.get_frame_size();
+
+		const int downscale = downscaleCmdOpt > 0 ? (int)downscaleCmdOpt : 1 + frameSize.min() / 1000;
 
 		PRINT_DEBUG(downscale);
 
-		VidStabProcessor frameProcessor(params, ignoreRects, downscale, prezoomCmdOpt, autozoomCmdOpt, zoomSpeedCmdOpt, debugImprintCmdOpt);
+		VidStabProcessor frameProcessor(params, frameSize.width, frameSize.height, downscale, ignoreRects, prezoomCmdOpt, autozoomCmdOpt, zoomSpeedCmdOpt, debugImprintCmdOpt);
 
 		if (autozoomCmdOpt) {
 			videoProcessor.process(frameProcessor, true);
-			frameProcessor.smoothen_zoom();
+			frameProcessor.optimize_zoom();
 			videoProcessor.init_input();
 		}
 		videoProcessor.process(frameProcessor, false);
