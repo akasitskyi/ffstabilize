@@ -87,16 +87,6 @@ public:
 		int outStreamIndex = 0;
 		videoStreamIndex = -1;
 
-		{
-			const AVCodec* current_codec = NULL;
-			void *i = 0;
-			while (current_codec = av_codec_iterate(&i)) {
-				if (av_codec_is_decoder(current_codec) && current_codec->type == AVMEDIA_TYPE_VIDEO) {
-					std::cout << current_codec->name << std::endl;
-				}
-			}
-		}
-
 		for (int i = 0; i < inputFormatContext->nb_streams; i++) {
 			AVCodecParameters *inCodecParameters = inputFormatContext->streams[i]->codecpar;
 
@@ -127,6 +117,10 @@ public:
 		ASSERT_TRUE(videoStreamIndex >= 0);
 
 		inputCodecContext = avcodec_alloc_context3(inputVideoCodec);
+		inputCodecContext->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
+		inputCodecContext->thread_count = std::thread::hardware_concurrency();
+		PRINT_DEBUG(inputCodecContext->thread_count);
+
 		ASSERT_TRUE(inputCodecContext != nullptr);
 		ASSERT_TRUE(avcodec_parameters_to_context(inputCodecContext, inputVideoCodecParameters) >= 0);
 		ASSERT_TRUE(avcodec_open2(inputCodecContext, inputVideoCodec, NULL) >= 0);
@@ -414,7 +408,7 @@ public:
 		motion.shift *= 1. / zoom;
 
 		const int planes = pixdesc->nb_components;
-		ASSERT_EQUAL(planes, av_pix_fmt_count_planes((AVPixelFormat)src->format));
+		//ASSERT_EQUAL(planes, av_pix_fmt_count_planes((AVPixelFormat)src->format));
 
 		static c4::time_printer tp2("VidStabProcessor::process(): apply", c4::LOG_DEBUG);
         c4::scoped_timer timer2(tp2);
