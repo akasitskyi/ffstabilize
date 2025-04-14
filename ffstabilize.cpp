@@ -87,6 +87,16 @@ public:
 		int outStreamIndex = 0;
 		videoStreamIndex = -1;
 
+		{
+			const AVCodec* current_codec = NULL;
+			void *i = 0;
+			while (current_codec = av_codec_iterate(&i)) {
+				if (av_codec_is_decoder(current_codec) && current_codec->type == AVMEDIA_TYPE_VIDEO) {
+					std::cout << current_codec->name << std::endl;
+				}
+			}
+		}
+
 		for (int i = 0; i < inputFormatContext->nb_streams; i++) {
 			AVCodecParameters *inCodecParameters = inputFormatContext->streams[i]->codecpar;
 
@@ -178,6 +188,9 @@ public:
 	}
 
 	void process(FrameProcessor& frame_processor, bool preprocess) {
+		c4::time_printer tp("FfmpegVideoProcessor::process()", c4::LOG_DEBUG);
+		c4::scoped_timer timer(tp);
+
 		c4::progress_indicator progress(frameNumber, preprocess ? "Pre-processing frames" : "Processing frames");
 
 		AVPacket packet;
@@ -289,6 +302,8 @@ class VidStabProcessor : public FfmpegVideoProcessor::FrameProcessor {
 		return stabilizer.process(frame, scaledIgnoreRects);
 	}
 
+	c4::matrix<uint8_t> srcPlaneCopy;
+
 public:
 	VidStabProcessor(const c4::VideoStabilization::Params& params, int frameWidth, int frameHeight, int downscale, const std::vector<c4::rectangle<int>> ignoreRects, double prezoom, bool autozoom, double zoomSpeed, bool debugImprint)
 		: stabilizer(params), frameWidth(frameWidth), frameHeight(frameHeight), downscale(downscale), workWidth(frameWidth / downscale), workHeight(frameHeight / downscale), ignoreRects(ignoreRects), prezoom(prezoom), autozoom(autozoom), zoomSpeed(zoomSpeed), debugImprint(debugImprint) {
@@ -376,7 +391,8 @@ public:
 	}
 
 	void process(AVFrame* src) override {
-        c4::scoped_timer timer("VidStabProcessor()");
+		static c4::time_printer tp1("VidStabProcessor::process()", c4::LOG_DEBUG);
+        c4::scoped_timer timer1(tp1);
 
 		ASSERT_TRUE(src != nullptr);
 		AV_CALL(av_frame_make_writable(src));
@@ -400,7 +416,8 @@ public:
 		const int planes = pixdesc->nb_components;
 		ASSERT_EQUAL(planes, av_pix_fmt_count_planes((AVPixelFormat)src->format));
 
-        c4::scoped_timer timer2("VidStabProcessor(): apply");
+		static c4::time_printer tp2("VidStabProcessor::process(): apply", c4::LOG_DEBUG);
+        c4::scoped_timer timer2(tp2);
 
 		for (int p = 0; p < planes; p++) {
 			const int h = p ? AV_CEIL_RSHIFT(src->height, pixdesc->log2_chroma_h) : src->height;
@@ -413,7 +430,7 @@ public:
 				ASSERT_EQUAL(pixdesc->comp[p].step, 1);
 
 				c4::matrix_ref<uint8_t> planeRef(h, w, src->linesize[p], src->data[p] + pixdesc->comp[p].offset);
-				c4::matrix<uint8_t> srcPlaneCopy = planeRef;
+				srcPlaneCopy = planeRef;
 				planeSizeAdjustedMotion.apply(srcPlaneCopy, planeRef);
 
 				if (p == 0 && debugImprint) {
