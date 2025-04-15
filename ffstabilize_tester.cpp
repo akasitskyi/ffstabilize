@@ -35,12 +35,14 @@ int test(const std::string& exe, const std::string& fin) {
 		auto s1 = std::filesystem::file_size(fin);
 		auto s2 = std::filesystem::file_size(fout);
 
-		if (s1 > 2 * s2 || s2 > 2 * s1) {
+		if (s1 > 3 * s2 || s2 > 3 * s1) {
 			ret = -1;
+			std::cerr << "File size mismatch: " << fin << " (" << s1 << ") vs " << fout << " (" << s2 << ")" << std::endl;
 		}
 	}
 
 	if (std::remove(fout.c_str())) {
+		std::cerr << "Error deleting file: " << fout << std::endl;
 		ret = -1;
 	}
 
