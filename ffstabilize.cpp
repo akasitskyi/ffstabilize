@@ -158,6 +158,10 @@ public:
 		outputCodecContext->bit_rate = output_bitrate ? output_bitrate : inputCodecContext->bit_rate;
 		outputCodecContext->time_base = av_inv_q(input_framerate);
 
+		outputCodecContext->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
+		outputCodecContext->thread_count = std::thread::hardware_concurrency();
+		PRINT_DEBUG(outputCodecContext->thread_count);
+
 		AV_CALL(avcodec_open2(outputCodecContext, outputVideoCodec, NULL));
 		AV_CALL(avcodec_parameters_from_context(outputFormatContext->streams[videoStreamIndex]->codecpar, outputCodecContext));
 
