@@ -28,7 +28,7 @@
 
 int test(const std::string& exe, const std::string& fin) {
 	const std::string fout = "tmp.mp4";
-	std::string cmd = exe + " " + fin + " " + fout;
+	std::string cmd = exe + " " + fin + " " + fout + " --debug";
 
 	int ret = std::system(cmd.c_str());
 	if(ret == 0) {
@@ -59,9 +59,12 @@ int main(int argc, char* argv[]) {
 		"h264_1080p_30fps_a.mp4",
 		"hevc_4k_30fps_10bit.mp4",
 		"hevc_4k_120fps_10bit.mp4",
+// We need a lot of memory to process 8k 10-bit video
+#if MEMORY_SIZE > 24 * 1000
 		"hevc_8k_30fps_10bit.mp4",
 		"hevc_8k_30fps_10bit_422.mp4",
 		"hevc_8k_30fps_10bit_444.mp4",
+#endif
 		"hevc_720p_60fps_10bit.mp4",
 		"hevc_720p_60fps_10bit_422.mp4",
 		"hevc_720p_60fps_10bit_444.mp4",
@@ -69,6 +72,7 @@ int main(int argc, char* argv[]) {
 	};
 
 	for (const auto& file : files) {
+		std::cout << "Processing " << file << std::endl;
 		if (test(exe, "../test_data/" + file)) {
 			std::cerr << "Test failed for " << file << std::endl;
 			return -1;

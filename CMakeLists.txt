@@ -9,9 +9,6 @@ endif()
 
 set(CPACK_PACKAGE_VENDOR "Alex Kasitskyi")
 
-add_definitions( -DPROJECT_VERSION="${CMAKE_PROJECT_VERSION}" )
-add_definitions( -DPROJECT_VENDOR="${CPACK_PACKAGE_VENDOR}" )
-
 if(UNIX)
     if(${CMAKE_SYSTEM_PROCESSOR} MATCHES "arm")
         SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mfpu=neon")
@@ -32,6 +29,8 @@ include_directories( ${FFMPEG}/include )
 add_subdirectory( c4/c4 )
 
 add_executable( ffstabilize ffstabilize.cpp )
+
+target_compile_definitions( ffstabilize PRIVATE PROJECT_VERSION="${CMAKE_PROJECT_VERSION}" PRIVATE PROJECT_VENDOR="${CPACK_PACKAGE_VENDOR}" )
 
 if (MSVC)
 	target_link_libraries( ffstabilize
@@ -56,7 +55,11 @@ else()
 	)
 endif()
 
+cmake_host_system_information(RESULT MEMORY_SIZE QUERY TOTAL_PHYSICAL_MEMORY)
+
 add_executable( ffstabilize_tester ffstabilize_tester.cpp )
+
+target_compile_definitions(ffstabilize_tester PRIVATE MEMORY_SIZE=${MEMORY_SIZE} )
 
 add_dependencies( ffstabilize_tester ffstabilize )
 

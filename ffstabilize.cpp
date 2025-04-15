@@ -159,7 +159,7 @@ public:
 		outputCodecContext->time_base = av_inv_q(input_framerate);
 
 		outputCodecContext->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
-		outputCodecContext->thread_count = std::thread::hardware_concurrency();
+		outputCodecContext->thread_count = std::thread::hardware_concurrency() / 2;
 		PRINT_DEBUG(outputCodecContext->thread_count);
 
 		AV_CALL(avcodec_open2(outputCodecContext, outputVideoCodec, NULL));
