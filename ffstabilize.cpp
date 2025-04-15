@@ -186,8 +186,7 @@ public:
 	}
 
 	void process(FrameProcessor& frame_processor, bool preprocess) {
-		c4::time_printer tp("FfmpegVideoProcessor::process()", c4::LOG_DEBUG);
-		c4::scoped_timer timer(tp);
+		STATIC_SCOPED_TIMER("FfmpegVideoProcessor::process()");
 
 		c4::progress_indicator progress(frameNumber, preprocess ? "Pre-processing frames" : "Processing frames");
 
@@ -280,8 +279,7 @@ class VidStabProcessor : public FfmpegVideoProcessor::FrameProcessor {
 	}
 
 	c4::MotionDetector::Motion detect(AVFrame* src, const AVPixFmtDescriptor *pixdesc) {
-		static c4::time_printer tp("VidStabProcessor::detect()", c4::LOG_DEBUG);
-        c4::scoped_timer timer(tp);
+		STATIC_SCOPED_TIMER("VidStabProcessor::detect()");
 
 		c4::VideoStabilization::FramePtr frame = std::make_shared<c4::VideoStabilization::Frame>();
 
@@ -389,8 +387,7 @@ public:
 	}
 
 	void process(AVFrame* src) override {
-		static c4::time_printer tp1("VidStabProcessor::process()", c4::LOG_DEBUG);
-        c4::scoped_timer timer1(tp1);
+		STATIC_SCOPED_TIMER("VidStabProcessor::process()");
 
 		ASSERT_TRUE(src != nullptr);
 		AV_CALL(av_frame_make_writable(src));
@@ -412,10 +409,9 @@ public:
 		motion.shift *= 1. / zoom;
 
 		const int planes = pixdesc->nb_components;
-		//ASSERT_EQUAL(planes, av_pix_fmt_count_planes((AVPixelFormat)src->format));
+		ASSERT_EQUAL(planes, av_pix_fmt_count_planes((AVPixelFormat)src->format));
 
-		static c4::time_printer tp2("VidStabProcessor::process(): apply", c4::LOG_DEBUG);
-        c4::scoped_timer timer2(tp2);
+		STATIC_SCOPED_TIMER("VidStabProcessor::process(): apply");
 
 		for (int p = 0; p < planes; p++) {
 			const int h = p ? AV_CEIL_RSHIFT(src->height, pixdesc->log2_chroma_h) : src->height;
@@ -508,7 +504,7 @@ int main(int argc, char* argv[]) {
     try{
 		c4::Logger::setLogLevel(c4::LOG_INFO);
 
-		c4::scoped_timer timer("main", c4::LOG_DEBUG);
+		c4::scoped_timer timer("ffstabilize", c4::LOG_DEBUG);
 
 		c4::VideoStabilization::Params params;
 
