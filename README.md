@@ -80,3 +80,36 @@ Max scale ratio of consecutive frames (1 / max_scale if we scale down). The defa
 Motion detection confidence threshold for scene cut detection. The default value is 0.1. If algorithm is missing some cuts - decrease it, if it cutsa where it shouldn't - increase. Information about detected cuts can be found using --debug option.
 
 # Examples
+### Original (source) video
+You can download the source video here (Google Drive):  [wwimf_1st_scene_src_4k.mp4](https://drive.google.com/file/d/1urXm6aUY-B69dK8MhdI7AmU_VYO4-iv_/view?usp=drive_link)  
+### ffstabilize
+ffstabilize default params
+```
+ffstabilize wwimf_1st_scene_src_4k.mp4 wwimf_1st_scene_ffstab-0.1.1.mp4 --codec hevc_nvenc
+```
+Download here:  [wwimf_1st_scene_ffstab-0.1.1.mp4](https://drive.google.com/file/d/17McaWfDbe05WwfXA8GJhSZCX0ci7vLGL/view?usp=drive_link)  
+<br/>
+<br/>
+ffstabilize with autozoom
+```
+ffstabilize wwimf_1st_scene_src_4k.mp4 wwimf_1st_scene_ffstab-0.1.1-az.mp4 --codec hevc_nvenc --autozoom
+```
+Download here:  [wwimf_1st_scene_ffstab-0.1.1-az.mp4](https://drive.google.com/file/d/1yqO4IZ1cMrdzbYWqR0RoT5ottHHA1gYH/view?usp=drive_link)  
+<br/>
+<br/>
+ffstabilize with autozoom and bigger smooth params
+```
+ffstabilize wwimf_1st_scene_src_4k.mp4 wwimf_1st_scene_ffstab-0.1.1-az-sm50.mp4 --codec hevc_nvenc --autozoom --x_smooth 50 --y_smooth 50
+```
+Download here:  [wwimf_1st_scene_ffstab-0.1.1-az-sm50.mp4](https://drive.google.com/file/d/1i59Zw2kqfWqnDjGSYIxvDfG_GUu3owwn/view?usp=drive_link)  
+<br/>
+### Adobe Premiere Pro
+Method: Position, Scale, Rotation: [wwimf_1st_scene_app_psr.mp4](https://drive.google.com/file/d/10EU7Ox8h4rjsbUkqz4LBE58NuWFW42-k/view?usp=drive_link)  
+Method: Subspace Warp: [wwimf_1st_scene_app_sw.mp4](https://drive.google.com/file/d/1-SLFFxw1Roj88uPZC-KBtByYpkFreoCq/view?usp=drive_link)  
+<br/>
+### Processing times
+ffstabilize processing time was 28s without autozoom, and 36s with autozoom.  
+Adobe Premiere Pro analyzing time is 1:21, and encoding time is 0:19, obviously UI manipulation time is not included.  
+<br/>
+### Compare on YouTube
+Original + ffstabilize (--autozoom --x_smooth 50 --y_smooth 50) + adobe position scale rotation + adobe subspace warp: [YouTube Video](https://youtu.be/jXYexBUEIFQ)
