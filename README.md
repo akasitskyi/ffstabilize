@@ -1,5 +1,6 @@
 # ffstabilize
-Very fast command line video stabilization tool, based on ffmpeg libav for video decoding and encoding.
+Very fast command line video stabilization tool, based on ffmpeg libav for video decoding and encoding.  
+[Demo video on YouTube](https://youtu.be/pfKWAo2nPJU)
 
 # Install
 ## Windows
