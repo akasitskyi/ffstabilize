@@ -112,4 +112,4 @@ ffstabilize processing time was 28s without autozoom, and 36s with autozoom.
 Adobe Premiere Pro analyzing time is 1:21, and encoding time is 0:19, obviously UI manipulation time is not included.  
 <br/>
 ### Compare on YouTube
-Original + ffstabilize (--autozoom --x_smooth 50 --y_smooth 50) + adobe position scale rotation + adobe subspace warp: [YouTube Video](https://youtu.be/jXYexBUEIFQ)
+Original + ffstabilize (--autozoom --x_smooth 50 --y_smooth 50) + adobe position scale rotation + adobe subspace warp: [YouTube Video](https://youtu.be/UwWBu9h01XQ)
