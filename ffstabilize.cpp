@@ -145,7 +145,23 @@ public:
 		}
 
 		AVRational input_framerate = av_guess_frame_rate(inputFormatContext, inputFormatContext->streams[videoStreamIndex], NULL);
-		const AVCodec* outputVideoCodec = avcodec_find_encoder_by_name(output_codec.c_str());
+
+		AVBufferRef* hw_device_ctx;
+		const bool haveCUDA = av_hwdevice_ctx_create(&hw_device_ctx, AV_HWDEVICE_TYPE_CUDA, "auto", NULL, 0) == 0;
+		av_buffer_unref(&hw_device_ctx);
+
+		PRINT_DEBUG(haveCUDA);
+
+		const std::string encoder =
+			output_codec != "hevc" ?
+				output_codec
+			:
+				haveCUDA && inputCodecContext->pix_fmt == AV_PIX_FMT_YUV420P ?
+					"hevc_nvenc"
+				:
+					"libx265";
+
+		const AVCodec* outputVideoCodec = avcodec_find_encoder_by_name(encoder.c_str());
 		ASSERT_TRUE(outputVideoCodec != nullptr);
 
 		outputCodecContext = avcodec_alloc_context3(outputVideoCodec);
@@ -512,7 +528,7 @@ int main(int argc, char* argv[]) {
 		auto inputCmdOpt = opts.add_required_free_arg<std::string>("input.mp4");
 		auto outputCmdOpt = opts.add_required_free_arg<std::string>("output.mp4");
 		auto bitrateCmdOpt = opts.add_optional<std::string>("bitrate", "0", "Target bitrate.");
-		auto codecCmdOpt = opts.add_optional<std::string>("codec", "libx265", "Output video codec. Default is libx265. You can use libx264, but you shouldn't. If you have nvidia drivers, you can try hevc_nvenc - it's faster, but has some pixel format limitations.");
+		auto codecCmdOpt = opts.add_optional<std::string>("codec", "hevc", "Output video codec. By default we will use libx265 (or hevc_nvenc if we think your system supports it and pixel format is yuv420p). You can use libx264, but you shouldn't.");
 		auto downscaleCmdOpt = opts.add_optional<int>("downscale", -1, "Downscale factor used for motion detection. Default value of -1 means automatic (based on resolution).");
 		auto prezoomCmdOpt = opts.add_optional<double>("prezoom", 1.0, "Pre-zoom the source this much.");
 		auto autozoomCmdOpt = opts.add_flag("autozoom", "Automatic zooming to fill the resulting frame. Two-pass decoding is enabled if autozoom is on.");
