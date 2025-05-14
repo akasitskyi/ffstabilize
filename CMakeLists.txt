@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.28)
-project( ffstabilize VERSION 0.1.1)
+project( ffstabilize VERSION 0.1.2)
 
 set (CMAKE_CXX_STANDARD 20)
 
