@@ -441,7 +441,11 @@ public:
 
 				c4::matrix_ref<uint8_t> planeRef(h, w, src->linesize[p], src->data[p] + pixdesc->comp[p].offset);
 				srcPlaneCopy = planeRef;
-				planeSizeAdjustedMotion.apply(srcPlaneCopy, planeRef);
+				if (p == 0) {
+					planeSizeAdjustedMotion.apply(srcPlaneCopy, planeRef);
+				}else{
+					planeSizeAdjustedMotion.apply_nn(srcPlaneCopy, planeRef);
+				}
 
 				if (p == 0 && debugImprint) {
 					c4::draw_string(planeRef, 20, 15, "frame " + c4::to_string(frameCounter++, 4), uint8_t(255), uint8_t(0), 2);
