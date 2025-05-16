@@ -26,9 +26,9 @@
 #include <iostream>
 #include <filesystem>
 
-int test(const std::string& exe, const std::string& fin) {
+int test(const std::string& exe, const std::string& fin, const std::string& params) {
 	const std::string fout = "tmp.mp4";
-	std::string cmd = exe + " " + fin + " " + fout + " --debug";
+	std::string cmd = exe + " " + fin + " " + fout + " " + params + " --debug";
 
 	int ret = std::system(cmd.c_str());
 	if(ret == 0) {
@@ -53,28 +53,27 @@ int main(int argc, char* argv[]) {
 	const std::string path = std::filesystem::path(argv[0]).parent_path().string();
 	const std::string exe = path + "/ffstabilize";
 
-	const std::vector<std::string> files {
-		"h246_720p_60fps.mp4",
-		"h264_4k_30fps.mp4",
-		"h264_1080p_30fps_a.mp4",
-		"hevc_4k_30fps_10bit.mp4",
-		"hevc_4k_120fps_10bit.mp4",
+	std::vector<std::pair<std::string, std::string>> files;
+	files.emplace_back("h246_720p_60fps.mp4", "");
+	files.emplace_back("h264_4k_30fps.mp4", "");
+	files.emplace_back("h264_1080p_30fps_a.mp4", "");
+	files.emplace_back("hevc_4k_30fps_10bit.mp4", "");
+	files.emplace_back("hevc_4k_120fps_10bit.mp4", "");
 // We need a lot of memory to process 8k 10-bit video
 #if MEMORY_SIZE > 24 * 1000
-		"hevc_8k_30fps_10bit.mp4",
-		"hevc_8k_30fps_10bit_422.mp4",
-		"hevc_8k_30fps_10bit_444.mp4",
+	files.emplace_back("hevc_8k_30fps_10bit.mp4", "");
+	files.emplace_back("hevc_8k_30fps_10bit_422.mp4", "");
+	files.emplace_back("hevc_8k_30fps_10bit_444.mp4", "--nocuda"); // Too large for my RTX 3070 Ti Laptop
 #endif
-		"hevc_720p_60fps_10bit.mp4",
-		"hevc_720p_60fps_10bit_422.mp4",
-		"hevc_720p_60fps_10bit_444.mp4",
-		"hevc_1080p_30fps_10bit_444_a.mp4"
-	};
+	files.emplace_back("hevc_720p_60fps_10bit.mp4", "");
+	files.emplace_back("hevc_720p_60fps_10bit_422.mp4", "");
+	files.emplace_back("hevc_720p_60fps_10bit_444.mp4", "");
+	files.emplace_back("hevc_1080p_30fps_10bit_444_a.mp4", "");
 
 	for (const auto& file : files) {
-		std::cout << "Processing " << file << std::endl;
-		if (test(exe, "../test_data/" + file)) {
-			std::cerr << "Test failed for " << file << std::endl;
+		std::cout << "Processing " << file.first << std::endl;
+		if (test(exe, "../test_data/" + file.first, file.second)) {
+			std::cerr << "Test failed for " << file.first << std::endl;
 			return -1;
 		}
 	}

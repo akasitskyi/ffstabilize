@@ -49,7 +49,7 @@ static int av_check_err(int err, std::string filename, int line) {
 class FfmpegVideoProcessor {
 	const std::string input_filename;
 	const std::string output_filename;
-	const bool useCUDA;
+	bool useCUDA;
 	const std::string output_codec;
 	const int64_t output_bitrate;
 
@@ -109,19 +109,25 @@ public:
 
 			const AVCodec* codec = avcodec_find_decoder(inCodecParameters->codec_id);
 			
-			if (useCUDA && inCodecParameters->codec_id == AV_CODEC_ID_H264) {
-				codec = avcodec_find_decoder_by_name("h264_cuvid");
-			}
-			if (useCUDA && inCodecParameters->codec_id == AV_CODEC_ID_HEVC) {
-				codec = avcodec_find_decoder_by_name("hevc_cuvid");
-			}
-
 			if (!codec) {
 				continue;
 			}
-			PRINT_DEBUG(codec->name);
-			PRINT_DEBUG(inCodecParameters->bit_rate);
 			if (inCodecParameters->codec_type == AVMEDIA_TYPE_VIDEO) {
+				const AVPixelFormat PIX_FORMAT = (AVPixelFormat)inCodecParameters->format;
+				PRINT_DEBUG(PIX_FORMAT);
+				const AVPixelFormat pixFmtsCuda[] { AV_PIX_FMT_YUV420P, AV_PIX_FMT_YUV420P10LE, AV_PIX_FMT_YUV444P10LE };
+				if (useCUDA && std::count(std::begin(pixFmtsCuda), std::end(pixFmtsCuda), PIX_FORMAT) == 0) {
+					useCUDA = false;
+					LOGW << "Disabling CUDA because of the pix format: " << PIX_FORMAT;
+				}
+
+				if (useCUDA && inCodecParameters->codec_id == AV_CODEC_ID_H264) {
+					codec = avcodec_find_decoder_by_name("h264_cuvid");
+				}
+				if (useCUDA && inCodecParameters->codec_id == AV_CODEC_ID_HEVC) {
+					codec = avcodec_find_decoder_by_name("hevc_cuvid");
+				}
+
 				videoStreamIndex = i;
 				inputVideoCodec = codec;
 				inputVideoCodecParameters = inCodecParameters;
@@ -130,18 +136,22 @@ public:
 				PRINT_DEBUG(inCodecParameters->width);
 				PRINT_DEBUG(inCodecParameters->height);
 			}
+
+			PRINT_DEBUG(codec->name);
+			PRINT_DEBUG(inCodecParameters->bit_rate);
 		}
 
 		ASSERT_TRUE(videoStreamIndex >= 0);
 
 		inputCodecContext = avcodec_alloc_context3(inputVideoCodec);
+		inputCodecContext->pkt_timebase = inputFormatContext->streams[videoStreamIndex]->time_base;
 		inputCodecContext->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
 		inputCodecContext->thread_count = std::thread::hardware_concurrency();
 		PRINT_DEBUG(inputCodecContext->thread_count);
 
 		ASSERT_TRUE(inputCodecContext != nullptr);
-		ASSERT_TRUE(avcodec_parameters_to_context(inputCodecContext, inputVideoCodecParameters) >= 0);
-		ASSERT_TRUE(avcodec_open2(inputCodecContext, inputVideoCodec, NULL) >= 0);
+		AV_CALL(avcodec_parameters_to_context(inputCodecContext, inputVideoCodecParameters));
+		AV_CALL(avcodec_open2(inputCodecContext, inputVideoCodec, NULL));
 	}
 
 	void init_output() {
@@ -485,26 +495,41 @@ public:
 					}
 				}
 			}else{
-				// FIXME: work with interleaved chroma for 16-bit data as well
-				ASSERT_EQUAL(pixdesc->nb_components, planes);
 				ASSERT_TRUE(pixdesc->comp[p].depth > 8 && pixdesc->comp[p].depth <= 16);
-				ASSERT_EQUAL(pixdesc->comp[p].step, 2);
+				if (p == 0) {
+					ASSERT_EQUAL(pixdesc->comp[p].step, 2);
 
-				c4::matrix_ref<uint16_t> planeRef(h, w, src->linesize[p] / 2, (uint16_t*)(src->data[p] + pixdesc->comp[p].offset));
-				c4::matrix<uint16_t> srcPlaneCopy = planeRef;
-				planeSizeAdjustedMotion.apply(srcPlaneCopy, planeRef);
+					c4::matrix_ref<uint16_t> planeRef(h, w, src->linesize[p] / 2, (uint16_t*)(src->data[p] + pixdesc->comp[p].offset));
+					c4::matrix<uint16_t> srcPlaneCopy16 = planeRef;
+					planeSizeAdjustedMotion.apply(srcPlaneCopy16, planeRef);
 
-				if (p == 0 && debugImprint) {
-					const uint16_t fg = (1 << pixdesc->comp[p].depth) - 1;
-					const uint16_t bg = 0;
-					c4::draw_string(planeRef, 20, 15, "frame " + c4::to_string(frameCounter++, 4), fg, bg, 2);
+					if (debugImprint) {
+						const uint16_t fg = (1 << pixdesc->comp[p].depth) - 1;
+						const uint16_t bg = 0;
+						c4::draw_string(planeRef, 20, 15, "frame " + c4::to_string(frameCounter++, 4), fg, bg, 2);
 
-					c4::draw_string(planeRef, 20, 45, "shift: " + c4::to_string(motion.shift.x, 2) + ", " + c4::to_string(motion.shift.y, 2)
-						+ ", scale: " + c4::to_string(motion.scale * zoom, 4)
-						+ ", alpha: " + c4::to_string(motion.alpha, 4), fg, bg, 2);
+						c4::draw_string(planeRef, 20, 45, "shift: " + c4::to_string(motion.shift.x, 2) + ", " + c4::to_string(motion.shift.y, 2)
+							+ ", scale: " + c4::to_string(motion.scale * zoom, 4)
+							+ ", alpha: " + c4::to_string(motion.alpha, 4), fg, bg, 2);
 
-					if (zoom != 1.) {
-						c4::draw_string(planeRef, 20, 75, "zoom: " + c4::to_string(zoom, 4), fg, bg, 2);
+						if (zoom != 1.) {
+							c4::draw_string(planeRef, 20, 75, "zoom: " + c4::to_string(zoom, 4), fg, bg, 2);
+						}
+					}
+				} else {
+					if (planes == 3){
+						ASSERT_EQUAL(pixdesc->comp[p].step, 2);
+
+						c4::matrix_ref<uint16_t> planeRef(h, w, src->linesize[p] / 2, (uint16_t*)(src->data[p] + pixdesc->comp[p].offset));
+						c4::matrix<uint16_t> srcPlaneCopy16 = planeRef;
+						planeSizeAdjustedMotion.apply_nn(srcPlaneCopy16, planeRef);
+					} else {
+						ASSERT_EQUAL(planes, 2);
+						ASSERT_EQUAL(pixdesc->comp[p].step, 4);
+
+						c4::matrix_ref<uint32_t> planeRef(h, w, src->linesize[p] / 4, (uint32_t*)src->data[p]);
+						c4::matrix<uint32_t> srcPlaneCopy32 = planeRef;
+						planeSizeAdjustedMotion.apply_nn(srcPlaneCopy32, planeRef);
 					}
 				}
 			}
