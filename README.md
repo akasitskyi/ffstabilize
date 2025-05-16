@@ -109,7 +109,7 @@ Method: Position, Scale, Rotation: [wwimf_1st_scene_app_psr.mp4](https://drive.g
 Method: Subspace Warp: [wwimf_1st_scene_app_sw.mp4](https://drive.google.com/file/d/1-SLFFxw1Roj88uPZC-KBtByYpkFreoCq/view?usp=drive_link)  
 <br/>
 ### Processing times
-ffstabilize v0.1.1 processing time was 28s without autozoom, and 36s with autozoom.  
+ffstabilize v0.1.3 processing time was 18s without autozoom, and 21s with autozoom.  
 Adobe Premiere Pro analyzing time is 1:21, and encoding time is 0:19, obviously UI manipulation time is not included.  
 <br/>
 ### Compare on YouTube
