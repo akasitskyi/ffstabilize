@@ -48,12 +48,14 @@ static int av_check_err(int err, std::string filename, int line) {
 
 class FfmpegVideoProcessor {
 	const std::string input_filename;
+	const std::string output_filename;
+	bool useCUDA;
+	const std::string output_codec;
+	const int64_t output_bitrate;
+
 	AVFormatContext* inputFormatContext = nullptr;
 	AVCodecContext* inputCodecContext = nullptr;
 
-	const std::string output_filename;
-	const std::string output_codec;
-	const int64_t output_bitrate;
 	AVFormatContext* outputFormatContext = nullptr;
 	AVCodecContext* outputCodecContext = nullptr;
 
@@ -62,6 +64,14 @@ class FfmpegVideoProcessor {
 	int frameNumber = 0;
 
 public:
+
+	static bool detect_cuda() {
+		AVBufferRef* hw_device_ctx;
+		const bool haveCUDA = av_hwdevice_ctx_create(&hw_device_ctx, AV_HWDEVICE_TYPE_CUDA, "auto", NULL, 0) == 0;
+		av_buffer_unref(&hw_device_ctx);
+
+		return haveCUDA;
+	}
 
 	class FrameProcessor {
 	public:
@@ -98,12 +108,26 @@ public:
 			streamMapping[i] = outStreamIndex++;
 
 			const AVCodec* codec = avcodec_find_decoder(inCodecParameters->codec_id);
+			
 			if (!codec) {
 				continue;
 			}
-			PRINT_DEBUG(codec->name);
-			PRINT_DEBUG(inCodecParameters->bit_rate);
 			if (inCodecParameters->codec_type == AVMEDIA_TYPE_VIDEO) {
+				const AVPixelFormat PIX_FORMAT = (AVPixelFormat)inCodecParameters->format;
+				PRINT_DEBUG(PIX_FORMAT);
+				const AVPixelFormat pixFmtsCuda[] { AV_PIX_FMT_YUV420P, AV_PIX_FMT_YUV420P10LE, AV_PIX_FMT_YUV444P10LE };
+				if (useCUDA && std::count(std::begin(pixFmtsCuda), std::end(pixFmtsCuda), PIX_FORMAT) == 0) {
+					useCUDA = false;
+					LOGW << "Disabling CUDA because of the pix format: " << PIX_FORMAT;
+				}
+
+				if (useCUDA && inCodecParameters->codec_id == AV_CODEC_ID_H264) {
+					codec = avcodec_find_decoder_by_name("h264_cuvid");
+				}
+				if (useCUDA && inCodecParameters->codec_id == AV_CODEC_ID_HEVC) {
+					codec = avcodec_find_decoder_by_name("hevc_cuvid");
+				}
+
 				videoStreamIndex = i;
 				inputVideoCodec = codec;
 				inputVideoCodecParameters = inCodecParameters;
@@ -112,18 +136,22 @@ public:
 				PRINT_DEBUG(inCodecParameters->width);
 				PRINT_DEBUG(inCodecParameters->height);
 			}
+
+			PRINT_DEBUG(codec->name);
+			PRINT_DEBUG(inCodecParameters->bit_rate);
 		}
 
 		ASSERT_TRUE(videoStreamIndex >= 0);
 
 		inputCodecContext = avcodec_alloc_context3(inputVideoCodec);
+		inputCodecContext->pkt_timebase = inputFormatContext->streams[videoStreamIndex]->time_base;
 		inputCodecContext->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
 		inputCodecContext->thread_count = std::thread::hardware_concurrency();
 		PRINT_DEBUG(inputCodecContext->thread_count);
 
 		ASSERT_TRUE(inputCodecContext != nullptr);
-		ASSERT_TRUE(avcodec_parameters_to_context(inputCodecContext, inputVideoCodecParameters) >= 0);
-		ASSERT_TRUE(avcodec_open2(inputCodecContext, inputVideoCodec, NULL) >= 0);
+		AV_CALL(avcodec_parameters_to_context(inputCodecContext, inputVideoCodecParameters));
+		AV_CALL(avcodec_open2(inputCodecContext, inputVideoCodec, NULL));
 	}
 
 	void init_output() {
@@ -146,17 +174,13 @@ public:
 
 		AVRational input_framerate = av_guess_frame_rate(inputFormatContext, inputFormatContext->streams[videoStreamIndex], NULL);
 
-		AVBufferRef* hw_device_ctx;
-		const bool haveCUDA = av_hwdevice_ctx_create(&hw_device_ctx, AV_HWDEVICE_TYPE_CUDA, "auto", NULL, 0) == 0;
-		av_buffer_unref(&hw_device_ctx);
-
-		PRINT_DEBUG(haveCUDA);
+		PRINT_DEBUG(useCUDA);
 
 		const std::string encoder =
 			output_codec != "hevc" ?
 				output_codec
 			:
-				haveCUDA && inputCodecContext->pix_fmt == AV_PIX_FMT_YUV420P ?
+				useCUDA ?
 					"hevc_nvenc"
 				:
 					"libx265";
@@ -190,8 +214,8 @@ public:
 		AV_CALL(avformat_write_header(outputFormatContext, NULL));
 	}
 
-	FfmpegVideoProcessor(const std::string& input_filename, const std::string& output_filename, const int64_t output_bitrate, const std::string output_codec)
-		: input_filename(input_filename), output_filename(output_filename), output_bitrate(output_bitrate), output_codec(output_codec) {
+	FfmpegVideoProcessor(const std::string& input_filename, const std::string& output_filename, const int64_t output_bitrate, const std::string output_codec, bool useCUDA)
+		: input_filename(input_filename), output_filename(output_filename), output_bitrate(output_bitrate), output_codec(output_codec), useCUDA(useCUDA) {
 		init_input();
 		init_output();
 	}
@@ -424,8 +448,7 @@ public:
 		motion.scale *= 1. / zoom;
 		motion.shift *= 1. / zoom;
 
-		const int planes = pixdesc->nb_components;
-		ASSERT_EQUAL(planes, av_pix_fmt_count_planes((AVPixelFormat)src->format));
+		const int planes = av_pix_fmt_count_planes((AVPixelFormat)src->format);
 
 		STATIC_SCOPED_TIMER("VidStabProcessor::process(): apply");
 
@@ -437,46 +460,76 @@ public:
 			planeSizeAdjustedMotion.shift.x *= (double)w / workWidth;
 
 			if (pixdesc->comp[p].depth == 8) {
-				ASSERT_EQUAL(pixdesc->comp[p].step, 1);
-
-				c4::matrix_ref<uint8_t> planeRef(h, w, src->linesize[p], src->data[p] + pixdesc->comp[p].offset);
-				srcPlaneCopy = planeRef;
 				if (p == 0) {
+					ASSERT_EQUAL(pixdesc->comp[p].step, 1);
+
+					c4::matrix_ref<uint8_t> planeRef(h, w, src->linesize[p], src->data[p] + pixdesc->comp[p].offset);
+					srcPlaneCopy = planeRef;
 					planeSizeAdjustedMotion.apply(srcPlaneCopy, planeRef);
+
+					if (debugImprint) {
+						c4::draw_string(planeRef, 20, 15, "frame " + c4::to_string(frameCounter++, 4), uint8_t(255), uint8_t(0), 2);
+
+						c4::draw_string(planeRef, 20, 45, "shift: " + c4::to_string(motion.shift.x, 2) + ", " + c4::to_string(motion.shift.y, 2)
+							+ ", scale: " + c4::to_string(motion.scale * zoom, 4)
+							+ ", alpha: " + c4::to_string(motion.alpha, 4), uint8_t(255), uint8_t(0), 2);
+
+						if (zoom != 1.) {
+							c4::draw_string(planeRef, 20, 75, "zoom: " + c4::to_string(zoom, 4), uint8_t(255), uint8_t(0), 2);
+						}
+					}
 				}else{
-					planeSizeAdjustedMotion.apply_nn(srcPlaneCopy, planeRef);
-				}
+					if (planes == 3){
+						ASSERT_EQUAL(pixdesc->comp[p].step, 1);
 
-				if (p == 0 && debugImprint) {
-					c4::draw_string(planeRef, 20, 15, "frame " + c4::to_string(frameCounter++, 4), uint8_t(255), uint8_t(0), 2);
+						c4::matrix_ref<uint8_t> planeRef(h, w, src->linesize[p], src->data[p] + pixdesc->comp[p].offset);
+						srcPlaneCopy = planeRef;
+						planeSizeAdjustedMotion.apply_nn(srcPlaneCopy, planeRef);
+					} else {
+						ASSERT_EQUAL(planes, 2);
+						ASSERT_EQUAL(pixdesc->comp[p].step, 2);
 
-					c4::draw_string(planeRef, 20, 45, "shift: " + c4::to_string(motion.shift.x, 2) + ", " + c4::to_string(motion.shift.y, 2)
-						+ ", scale: " + c4::to_string(motion.scale * zoom, 4)
-						+ ", alpha: " + c4::to_string(motion.alpha, 4), uint8_t(255), uint8_t(0), 2);
-
-					if (zoom != 1.) {
-						c4::draw_string(planeRef, 20, 75, "zoom: " + c4::to_string(zoom, 4), uint8_t(255), uint8_t(0), 2);
+						c4::matrix_ref<uint16_t> planeRef(h, w, src->linesize[p] / 2, (uint16_t*)src->data[p]);
+						c4::matrix<uint16_t> srcPlaneCopy16 = planeRef;
+						planeSizeAdjustedMotion.apply_nn(srcPlaneCopy16, planeRef);
 					}
 				}
 			}else{
 				ASSERT_TRUE(pixdesc->comp[p].depth > 8 && pixdesc->comp[p].depth <= 16);
-				ASSERT_EQUAL(pixdesc->comp[p].step, 2);
+				if (p == 0) {
+					ASSERT_EQUAL(pixdesc->comp[p].step, 2);
 
-				c4::matrix_ref<uint16_t> planeRef(h, w, src->linesize[p] / 2, (uint16_t*)(src->data[p] + pixdesc->comp[p].offset));
-				c4::matrix<uint16_t> srcPlaneCopy = planeRef;
-				planeSizeAdjustedMotion.apply(srcPlaneCopy, planeRef);
+					c4::matrix_ref<uint16_t> planeRef(h, w, src->linesize[p] / 2, (uint16_t*)(src->data[p] + pixdesc->comp[p].offset));
+					c4::matrix<uint16_t> srcPlaneCopy16 = planeRef;
+					planeSizeAdjustedMotion.apply(srcPlaneCopy16, planeRef);
 
-				if (p == 0 && debugImprint) {
-					const uint16_t fg = (1 << pixdesc->comp[p].depth) - 1;
-					const uint16_t bg = 0;
-					c4::draw_string(planeRef, 20, 15, "frame " + c4::to_string(frameCounter++, 4), fg, bg, 2);
+					if (debugImprint) {
+						const uint16_t fg = (1 << pixdesc->comp[p].depth) - 1;
+						const uint16_t bg = 0;
+						c4::draw_string(planeRef, 20, 15, "frame " + c4::to_string(frameCounter++, 4), fg, bg, 2);
 
-					c4::draw_string(planeRef, 20, 45, "shift: " + c4::to_string(motion.shift.x, 2) + ", " + c4::to_string(motion.shift.y, 2)
-						+ ", scale: " + c4::to_string(motion.scale * zoom, 4)
-						+ ", alpha: " + c4::to_string(motion.alpha, 4), fg, bg, 2);
+						c4::draw_string(planeRef, 20, 45, "shift: " + c4::to_string(motion.shift.x, 2) + ", " + c4::to_string(motion.shift.y, 2)
+							+ ", scale: " + c4::to_string(motion.scale * zoom, 4)
+							+ ", alpha: " + c4::to_string(motion.alpha, 4), fg, bg, 2);
 
-					if (zoom != 1.) {
-						c4::draw_string(planeRef, 20, 75, "zoom: " + c4::to_string(zoom, 4), fg, bg, 2);
+						if (zoom != 1.) {
+							c4::draw_string(planeRef, 20, 75, "zoom: " + c4::to_string(zoom, 4), fg, bg, 2);
+						}
+					}
+				} else {
+					if (planes == 3){
+						ASSERT_EQUAL(pixdesc->comp[p].step, 2);
+
+						c4::matrix_ref<uint16_t> planeRef(h, w, src->linesize[p] / 2, (uint16_t*)(src->data[p] + pixdesc->comp[p].offset));
+						c4::matrix<uint16_t> srcPlaneCopy16 = planeRef;
+						planeSizeAdjustedMotion.apply_nn(srcPlaneCopy16, planeRef);
+					} else {
+						ASSERT_EQUAL(planes, 2);
+						ASSERT_EQUAL(pixdesc->comp[p].step, 4);
+
+						c4::matrix_ref<uint32_t> planeRef(h, w, src->linesize[p] / 4, (uint32_t*)src->data[p]);
+						c4::matrix<uint32_t> srcPlaneCopy32 = planeRef;
+						planeSizeAdjustedMotion.apply_nn(srcPlaneCopy32, planeRef);
 					}
 				}
 			}
@@ -551,6 +604,7 @@ int main(int argc, char* argv[]) {
 		auto ignoreCmdOpt = opts.add_multiple("ignore", "Add rectangle where motion should be ignored. Format: \"x, y, w, h\".");
 
 		auto debugCmdOpt = opts.add_flag("debug", "Enable debug output.");
+		auto nocudaCmdOpt = opts.add_flag("nocuda", "Don't use CUDA HW acceleration.");
 		auto debugImprintCmdOpt = opts.add_flag("debug_imprint", "Enable motion info imprint on the output video.");
 		auto verboseCmdOpt = opts.add_flag("verbose", "Enable verbose output.");
 
@@ -603,7 +657,9 @@ int main(int argc, char* argv[]) {
 
 		c4::image_dumper::getInstance().init("", false);
 
-		FfmpegVideoProcessor videoProcessor(inputFilename, outputFilename, bitrate, codecCmdOpt);
+		const bool useCUDA = nocudaCmdOpt ? false : FfmpegVideoProcessor::detect_cuda();
+
+		FfmpegVideoProcessor videoProcessor(inputFilename, outputFilename, bitrate, codecCmdOpt, useCUDA);
 
 		const auto frameSize = videoProcessor.get_frame_size();
 
