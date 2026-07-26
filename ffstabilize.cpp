@@ -35,11 +35,15 @@ extern "C" {
 #include <libswscale/swscale.h>
 }
 
+static std::string av_make_err_str(int err) {
+	char errbuf[AV_ERROR_MAX_STRING_SIZE]{};
+	av_make_error_string(errbuf, AV_ERROR_MAX_STRING_SIZE, err);
+	return errbuf;
+}
+
 static int av_check_err(int err, std::string filename, int line) {
 	if (err < 0) {
-		char errbuf[AV_ERROR_MAX_STRING_SIZE]{};
-		av_make_error_string(errbuf, AV_ERROR_MAX_STRING_SIZE, err);
-		throw c4::exception(errbuf, filename, line);
+		throw c4::exception(av_make_err_str(err), filename, line);
 	}
 	return err;
 }
@@ -66,7 +70,7 @@ class FfmpegVideoProcessor {
 public:
 
 	static bool detect_cuda() {
-		AVBufferRef* hw_device_ctx;
+		AVBufferRef* hw_device_ctx = nullptr;
 		const bool haveCUDA = av_hwdevice_ctx_create(&hw_device_ctx, AV_HWDEVICE_TYPE_CUDA, "auto", NULL, 0) == 0;
 		av_buffer_unref(&hw_device_ctx);
 
@@ -230,31 +234,36 @@ public:
 
 		c4::progress_indicator progress(frameNumber, preprocess ? "Pre-processing frames" : "Processing frames");
 
+		AVStream* videoInputStream = inputFormatContext->streams[videoStreamIndex];
+		AVStream* videoOutputStream = outputFormatContext->streams[videoStreamIndex];
+
+		AVFrame* frame = av_frame_alloc();
+		auto process_decoded_frames = [&](){
+			while(avcodec_receive_frame(inputCodecContext, frame) >= 0) {
+				if (preprocess) {
+					frame_processor.preprocess(frame);
+				} else {
+					frame_processor.process(frame);
+					frame->pict_type = AV_PICTURE_TYPE_NONE;
+					encode_frame(videoInputStream, videoOutputStream, frame);
+				}
+				progress.did_some(1);
+			}
+		};
+
 		AVPacket packet;
+
 		while (av_read_frame(inputFormatContext, &packet) >= 0) {
 			if (streamMapping[packet.stream_index] < 0) {
 				av_packet_unref(&packet);
 				continue;
 			}
 
-			AVStream* inStream = inputFormatContext->streams[packet.stream_index];
-
 			if (packet.stream_index == videoStreamIndex) {
 				AV_CALL(avcodec_send_packet(inputCodecContext, &packet));
-
-				AVFrame* frame = av_frame_alloc();
-				while(avcodec_receive_frame(inputCodecContext, frame) >= 0) {
-					if (preprocess) {
-						frame_processor.preprocess(frame);
-					} else {
-						frame_processor.process(frame);
-						frame->pict_type = AV_PICTURE_TYPE_NONE;
-						encode_frame(inStream, outputFormatContext->streams[packet.stream_index], frame);
-					}
-					progress.did_some(1);
-				}
-				av_frame_unref(frame);
+				process_decoded_frames();
 			} else if (!preprocess) {
+				AVStream* inStream = inputFormatContext->streams[packet.stream_index];
 				AVStream* outStream = outputFormatContext->streams[packet.stream_index];
 				packet.pts = av_rescale_q_rnd(packet.pts, inStream->time_base, outStream->time_base, AVRounding(AV_ROUND_NEAR_INF|AV_ROUND_PASS_MINMAX));
 				packet.dts = av_rescale_q_rnd(packet.dts, inStream->time_base, outStream->time_base, AVRounding(AV_ROUND_NEAR_INF | AV_ROUND_PASS_MINMAX));
@@ -266,16 +275,23 @@ public:
 			av_packet_unref(&packet);
 		}
 
+		// Flush the decoder
+		AV_CALL(avcodec_send_packet(inputCodecContext, nullptr));
+		process_decoded_frames();
+
 		progress.print_final();
 
 		if (!preprocess) {
 			encode_frame(inputFormatContext->streams[videoStreamIndex], outputFormatContext->streams[videoStreamIndex], nullptr);
-			av_write_trailer(outputFormatContext);
-			avio_closep(&outputFormatContext->pb);
+			AV_CALL(av_write_trailer(outputFormatContext));
+			AV_CALL(avio_closep(&outputFormatContext->pb));
 			avformat_free_context(outputFormatContext);
+			avcodec_free_context(&outputCodecContext);
 		}
 
+		av_frame_free(&frame);
 		avformat_close_input(&inputFormatContext);
+		avcodec_free_context(&inputCodecContext);
 	}
 
 	void encode_frame(AVStream* inStream, AVStream* outStream, AVFrame* frame){
